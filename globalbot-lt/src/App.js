@@ -280,7 +280,8 @@ Portafoglio: ${portfolio.length ? portfolio.map(p=>p.symbol).join(", ") : "vuoto
 Watchlist: ${watchlist.join(", ")}
 Dati live:\n${live || "nessun dato caricato"}
 Principi: investimento LT, diversificazione globale, gestione rischio disciplinata. Rispondi in modo pratico.`;
-      const res  = await fetch("https://api.anthropic.com/v1/messages", {
+      const anthropicUrl = `/api/proxy?url=${encodeURIComponent("https://api.anthropic.com/v1/messages")}`;
+      const res  = await fetch(anthropicUrl, {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, system:sys,
           messages:[...msgs.slice(-8), { role:"user", content:txt }]
