@@ -85,14 +85,17 @@ function calcScore(signal, rsi, price, ma200) {
 const _cache = {};
 const TTL = 5 * 60 * 1000;
 
+const PROXY = "/api/proxy";
+function proxyUrl(targetUrl, key) {
+  return `${PROXY}?url=${encodeURIComponent(targetUrl)}&key=${encodeURIComponent(key)}`;
+}
+
 async function fetchRapidAPI(symbol, key) {
   const ck = `r_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
 
-  const qRes = await fetch(
-    `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=${encodeURIComponent(symbol)}&type=STOCKS`,
-    { headers: { "x-rapidapi-host": "yahoo-finance15.p.rapidapi.com", "x-rapidapi-key": key } }
-  );
+  const quoteTarget = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=${encodeURIComponent(symbol)}&type=STOCKS`;
+  const qRes = await fetch(proxyUrl(quoteTarget, key));
   if (!qRes.ok) throw new Error(`RapidAPI ${qRes.status}`);
   const qj = await qRes.json();
   const q  = qj?.body ?? qj?.quoteResponse?.result?.[0] ?? qj;
@@ -101,10 +104,8 @@ async function fetchRapidAPI(symbol, key) {
 
   let rsi = 50, ma50 = price, ma200 = price, sparkline = [];
   try {
-    const hRes = await fetch(
-      `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/stock/history?symbol=${encodeURIComponent(symbol)}&interval=1d&diffandsplits=false`,
-      { headers: { "x-rapidapi-host": "yahoo-finance15.p.rapidapi.com", "x-rapidapi-key": key } }
-    );
+    const histTarget = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/stock/history?symbol=${encodeURIComponent(symbol)}&interval=1d&diffandsplits=false`;
+    const hRes = await fetch(proxyUrl(histTarget, key));
     if (hRes.ok) {
       const hj = await hRes.json();
       const items = Object.values(hj?.body ?? {}).filter(i => i.close).slice(-220).reverse();
