@@ -389,6 +389,7 @@ export default function App() {
   ]);
   const [inp, setInp]         = useState("");
   const [typing, setTyping]   = useState(false);
+  const [testResult, setTestResult] = useState(null);
   const chatRef               = useRef(null);
   const allAssets             = Object.values(MARKETS).flat();
 
@@ -426,6 +427,25 @@ export default function App() {
     }
     setConnected(true);
     setTab("dashboard");
+    setTimeout(() => { watchlist.forEach(sym => fetchOne(sym)); }, 50);
+  };
+
+  const testConnection = async () => {
+    if (!activeKey) return;
+    setTestResult({ status: "loading", msg: "Test in corso..." });
+    try {
+      const r = await fetch("/api/proxy?url=" + encodeURIComponent("https://httpbin.org/get"));
+      if (!r.ok && r.status === 404) {
+        setTestResult({ status: "error", msg: "Il proxy /api/proxy non risponde (404). Su Vercel imposta Root Directory = 'globalbot-lt'. In dev locale (npm start) il proxy non gira: usa 'vercel dev'." });
+        return;
+      }
+      const d = provider === "rapidapi"
+        ? await fetchRapidAPI("AAPL", activeKey)
+        : await fetchAlphaVantage("AAPL", activeKey);
+      setTestResult({ status: "ok", msg: `✓ Connessione OK. AAPL = ${d.price?.toFixed(2)} USD, segnale ${d.signal}.` });
+    } catch (e) {
+      setTestResult({ status: "error", msg: `✗ ${e.message}` });
+    }
   };
 
   useEffect(() => { if (activeKey) setConnected(true); }, [activeKey]);
@@ -540,9 +560,18 @@ export default function App() {
                   value={provider==="rapidapi"?rapidKey:avKey}
                   onChange={e=>provider==="rapidapi"?setRapidKey(e.target.value):setAvKey(e.target.value)}
                   style={{ ...C.inp_, flex:1 }} />
+                <button onClick={testConnection} disabled={!activeKey} style={{ background:"#1e3a5f30", color:"#0099ff", border:"1px solid #0099ff40", borderRadius:10, padding:"10px 14px", cursor:activeKey?"pointer":"default", fontWeight:700, fontSize:13, opacity:activeKey?1:.4 }}>🔍 Test</button>
                 <button onClick={save} disabled={!activeKey} style={{ ...C.send, opacity:activeKey?1:.4, cursor:activeKey?"pointer":"default" }}>✓ Connetti</button>
               </div>
               <p style={{ color:"#64748b", fontSize:11, margin:"8px 0 0" }}>🔒 La chiave resta nel browser e viene inviata solo al provider scelto.</p>
+              {testResult && (
+                <div style={{
+                  marginTop:12, padding:"10px 12px", borderRadius:8, fontSize:12, lineHeight:1.5,
+                  background: testResult.status==="ok" ? "#00ff9d15" : testResult.status==="error" ? "#ff475715" : "#0099ff15",
+                  border: `1px solid ${testResult.status==="ok" ? "#00ff9d50" : testResult.status==="error" ? "#ff475750" : "#0099ff50"}`,
+                  color: testResult.status==="ok" ? "#00ff9d" : testResult.status==="error" ? "#ff8e9a" : "#94a3b8",
+                }}>{testResult.msg}</div>
+              )}
             </div>
 
             <div style={{ ...C.card, background:"#060a10" }}>
@@ -579,6 +608,14 @@ export default function App() {
                 {connected ? `Dati live via ${provider==="rapidapi"?"Yahoo Finance / RapidAPI":"Alpha Vantage"}` : "⚠️ Vai in Setup per collegare le API"}
               </p>
             </div>
+            {Object.keys(errs).length > 0 && (
+              <div style={{ background:"#ff475715", border:"1px solid #ff475750", borderRadius:10, padding:"10px 14px", marginBottom:14, fontSize:12, color:"#ff8e9a" }}>
+                ⚠️ <b>Errore caricamento dati</b> ({Object.keys(errs).length} simboli): {Object.values(errs)[0]}
+                <div style={{ color:"#94a3b8", marginTop:6, fontSize:11 }}>
+                  Verifica: 1) chiave RapidAPI valida e iscritta a <b>yahoo-finance15</b>; 2) il proxy <code>/api/proxy</code> è raggiungibile (deploy Vercel con Root Directory = <code>globalbot-lt</code>); 3) non hai superato il limite mensile.
+                </div>
+              </div>
+            )}
             <div style={C.g3}>
               {[
                 { label:"Asset Live",    value:liveN||"—", sub:`${allAssets.length} asset disponibili`, icon:"🌐", c:"#0099ff" },
