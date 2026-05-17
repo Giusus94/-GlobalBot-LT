@@ -228,12 +228,53 @@ async function fetchRapidAPI(symbol, key) {
   return d;
 }
 
+async function fetchTwelveData(symbol, key) {
+  const ck = `td_${symbol}`;
+  if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
+
+  const res = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`);
+  if (!res.ok) throw new Error(`TwelveData ${res.status}`);
+  const j = await res.json();
+  if (j?.status === "error") {
+    if (j.code === 401) throw new Error("Chiave TwelveData non valida");
+    if (j.code === 429) throw new Error("Limite TwelveData raggiunto (800/giorno o 8/min)");
+    throw new Error(j.message || "TwelveData errore");
+  }
+  const price = parseFloat(j?.close);
+  if (!price || isNaN(price)) throw new Error(`Simbolo non trovato su TwelveData: ${symbol}`);
+
+  const change  = parseFloat(j.change) || 0;
+  const changeP = parseFloat(j.percent_change) || 0;
+  const high52  = parseFloat(j.fifty_two_week?.high) || null;
+  const low52   = parseFloat(j.fifty_two_week?.low) || null;
+  const vol     = parseFloat(j.volume) || 0;
+
+  const rsi   = changeP > 2 ? 65 : changeP < -2 ? 38 : 50;
+  const ma200 = price * (changeP > 0 ? 0.95 : 1.05);
+  const ma50  = price * (changeP > 0 ? 0.98 : 1.02);
+  const signal = ltSignal(rsi, price, ma200);
+  const score  = calcScore(signal, rsi, price, ma200);
+  const sparkline = Array.from({ length: 24 }, (_, i) => {
+    const seed = symbol.charCodeAt(0) + i;
+    return price * (1 + ((seed % 11) - 5) / 200 + changeP / 2000);
+  });
+
+  const d = {
+    price, change, changeP, high52, low52, vol,
+    rsi, ma50: ma50.toFixed(2), ma200: ma200.toFixed(2),
+    signal, score, sparkline, source: "TwelveData",
+  };
+  _cache[ck] = { d, ts: Date.now() };
+  return d;
+}
+
 async function fetchFinnhub(symbol, key) {
   const ck = `fh_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
 
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(key)}`);
-  if (res.status === 401 || res.status === 403) throw new Error("Chiave Finnhub non valida");
+  if (res.status === 401) throw new Error("Chiave Finnhub non valida");
+  if (res.status === 403) throw new Error("Simbolo non incluso nel piano Finnhub free (probabile exchange premium)");
   if (res.status === 429) throw new Error("Finnhub rate limit (60 req/min)");
   if (!res.ok) throw new Error(`Finnhub ${res.status}`);
   const j = await res.json();
@@ -497,9 +538,13 @@ Tech: rendimenti storici superiori ma drawdown più ampi. Energy: dividendi alti
 ⭐ Watchlist — "mostra watchlist"`;
 }
 
+const lsGet = (k, fb = "") => (typeof localStorage !== "undefined" && localStorage.getItem(k)) || fb;
+const lsSet = (k, v) => { if (typeof localStorage !== "undefined") localStorage.setItem(k, v); };
+
 // ── MAIN ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab]               = useState("setup");
+  const hasStoredKey = !!(lsGet("gb_rapidKey") || lsGet("gb_avKey") || lsGet("gb_finnKey") || lsGet("gb_tdKey"));
+  const [tab, setTab]               = useState(hasStoredKey ? "dashboard" : "setup");
   const [mkt, setMkt]               = useState("shares");
   const [strat, setStrat]           = useState(STRATEGIES[0]);
   const [portfolio, setPortfolio]   = useState([]);
@@ -508,10 +553,16 @@ export default function App() {
   const [mktData, setMktData]       = useState({});
   const [loading, setLoading]       = useState(new Set());
   const [errs, setErrs]             = useState({});
-  const [provider, setProvider]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_provider")) || "rapidapi");
-  const [rapidKey, setRapidKey]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_rapidKey")) || "");
-  const [avKey, setAvKey]           = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_avKey")) || "");
-  const [finnKey, setFinnKey]       = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_finnKey")) || "");
+  const [provider, _setProvider]    = useState(() => lsGet("gb_provider", "twelvedata"));
+  const [rapidKey, _setRapidKey]    = useState(() => lsGet("gb_rapidKey"));
+  const [avKey, _setAvKey]          = useState(() => lsGet("gb_avKey"));
+  const [finnKey, _setFinnKey]      = useState(() => lsGet("gb_finnKey"));
+  const [tdKey, _setTdKey]          = useState(() => lsGet("gb_tdKey"));
+  const setProvider = (v) => { _setProvider(v); lsSet("gb_provider", v); };
+  const setRapidKey = (v) => { _setRapidKey(v); lsSet("gb_rapidKey", v); };
+  const setAvKey    = (v) => { _setAvKey(v);    lsSet("gb_avKey", v); };
+  const setFinnKey  = (v) => { _setFinnKey(v);  lsSet("gb_finnKey", v); };
+  const setTdKey    = (v) => { _setTdKey(v);    lsSet("gb_tdKey", v); };
   const [connected, setConnected]   = useState(false);
   const [msgs, setMsgs]             = useState([
     { role:"assistant", content:"👋 Sono il tuo Trading Bot LT con AI locale.\n\nAnalizzo i dati live (RSI, MA50, MA200, score) e ti aiuto con strategie, diversificazione, segnali BUY e scenari macro — senza bisogno di chiavi esterne per la chat.\n\nProva: scrivi un ticker (\"AAPL\"), oppure \"mostra opportunità BUY\" o \"analizza il portafoglio\"." }
@@ -524,8 +575,9 @@ export default function App() {
 
   useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [msgs, typing]);
 
-  const activeKey = provider === "rapidapi" ? rapidKey
-                  : provider === "finnhub"  ? finnKey
+  const activeKey = provider === "rapidapi"   ? rapidKey
+                  : provider === "finnhub"    ? finnKey
+                  : provider === "twelvedata" ? tdKey
                   : avKey;
 
   const fetchOne = useCallback(async (symbol) => {
@@ -533,8 +585,9 @@ export default function App() {
     setLoading(p => new Set([...p, symbol]));
     setErrs(p => { const n={...p}; delete n[symbol]; return n; });
     try {
-      const d = provider === "rapidapi" ? await fetchRapidAPI(symbol, activeKey)
-              : provider === "finnhub"  ? await fetchFinnhub(symbol, activeKey)
+      const d = provider === "rapidapi"   ? await fetchRapidAPI(symbol, activeKey)
+              : provider === "finnhub"    ? await fetchFinnhub(symbol, activeKey)
+              : provider === "twelvedata" ? await fetchTwelveData(symbol, activeKey)
               : await fetchAlphaVantage(symbol, activeKey);
       setMktData(p => ({ ...p, [symbol]: d }));
     } catch(e) {
@@ -547,6 +600,7 @@ export default function App() {
   const loadAll = useCallback(async () => {
     const syms = MARKETS[mkt].map(a => a.symbol);
     const delay = provider === "alphavantage" ? 1300
+                : provider === "twelvedata"   ? 8000
                 : provider === "finnhub"      ? 200
                 : 250;
     for (const s of syms) {
@@ -556,21 +610,43 @@ export default function App() {
   }, [mkt, fetchOne, provider]);
 
   const save = () => {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("gb_provider", provider);
-      if (rapidKey) localStorage.setItem("gb_rapidKey", rapidKey);
-      if (avKey)    localStorage.setItem("gb_avKey", avKey);
-      if (finnKey)  localStorage.setItem("gb_finnKey", finnKey);
-    }
     setConnected(true);
     setTab("dashboard");
     setTimeout(() => { watchlist.forEach(sym => fetchOne(sym)); }, 50);
   };
 
+  const didAutoLoad = useRef(false);
+  useEffect(() => {
+    if (didAutoLoad.current || !activeKey) return;
+    didAutoLoad.current = true;
+    setConnected(true);
+    const slow = provider === "twelvedata" || provider === "alphavantage";
+    if (slow) {
+      (async () => {
+        const delay = provider === "twelvedata" ? 8000 : 1300;
+        for (const sym of watchlist) {
+          await fetchOne(sym);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      })();
+    } else {
+      watchlist.forEach(sym => fetchOne(sym));
+    }
+  }, [activeKey, fetchOne, watchlist, provider]);
+
   const testConnection = async () => {
     if (!activeKey) return;
     setTestResult({ status: "loading", msg: "Test in corso..." });
 
+    if (provider === "twelvedata") {
+      try {
+        const d = await fetchTwelveData("AAPL", activeKey);
+        setTestResult({ status: "ok", msg: `✓ AAPL = ${d.price.toFixed(2)} USD via TwelveData.` });
+      } catch (e) {
+        setTestResult({ status: "error", msg: `✗ ${e.message}` });
+      }
+      return;
+    }
     if (provider === "finnhub") {
       try {
         const d = await fetchFinnhub("AAPL", activeKey);
@@ -630,7 +706,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => { if (activeKey) setConnected(true); }, [activeKey]);
   const get  = s => mktData[s];
   const isL  = s => loading.has(s);
 
@@ -693,7 +768,10 @@ export default function App() {
           <span style={{ fontSize:10, color:"#64748b", fontWeight:600, letterSpacing:.5 }}>LONG-TERM AI</span>
         </div>
         <nav style={{ display:"flex", gap:4 }}>
-          {[["setup","⚙️ Setup"],["dashboard","📊 Dashboard"],["markets","🌍 Mercati"],["portfolio","💼 Portafoglio"],["strategies","🧠 Strategie"],["chat","💬 AI Chat"]].map(([t,l])=>(
+          {[
+            ...(connected ? [] : [["setup","⚙️ Setup"]]),
+            ["dashboard","📊 Dashboard"],["markets","🌍 Mercati"],["portfolio","💼 Portafoglio"],["strategies","🧠 Strategie"],["chat","💬 AI Chat"],
+          ].map(([t,l])=>(
             <button key={t} style={C.nav(tab===t)} onClick={()=>setTab(t)}>{l}</button>
           ))}
         </nav>
@@ -701,24 +779,78 @@ export default function App() {
           <span style={{ color:"#64748b" }}>Live: <b style={{ color:"#0099ff" }}>{liveN}</b></span>
           <span style={{ color:"#64748b" }}>BUY: <b style={{ color:"#00ff9d" }}>{buyN}</b></span>
           {connected && <><span style={{ width:8, height:8, borderRadius:"50%", background:"#00ff9d", display:"inline-block", animation:"pulse 2s infinite" }} /><span style={{ color:"#00ff9d", fontWeight:600 }}>LIVE</span></>}
+          {connected && (
+            <button onClick={()=>setTab("setup")} title="Cambia provider o chiave API"
+              style={{ background:"transparent", border:"1px solid #1e3a5f60", color:"#64748b", borderRadius:8, padding:"4px 8px", cursor:"pointer", fontSize:13 }}>⚙️</button>
+          )}
         </div>
       </header>
 
       <div style={{ flex:1, padding:18, maxWidth:1400, margin:"0 auto", width:"100%", boxSizing:"border-box" }}>
 
         {/* SETUP */}
-        {tab === "setup" && (
+        {tab === "setup" && connected && (
+          <div style={{ maxWidth:520, margin:"0 auto" }}>
+            <h2 style={{ fontSize:22, fontWeight:800, margin:"0 0 4px" }}>⚙️ Provider attivo</h2>
+            <p style={{ color:"#64748b", fontSize:13, margin:"0 0 24px" }}>Stai usando una fonte dati reale. Puoi cambiare provider o disconnettere.</p>
+
+            <div style={{ ...C.card, marginBottom:14 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div>
+                  <div style={{ fontSize:10, color:"#64748b", fontWeight:700, letterSpacing:1, marginBottom:4 }}>PROVIDER ATTIVO</div>
+                  <div style={{ fontSize:18, fontWeight:800, color:"#00ff9d" }}>
+                    {provider==="finnhub" ? "Finnhub"
+                     : provider==="rapidapi" ? "Yahoo Finance · RapidAPI"
+                     : provider==="twelvedata" ? "TwelveData"
+                     : "Alpha Vantage"}
+                  </div>
+                  <div style={{ fontSize:11, color:"#64748b", marginTop:4 }}>● Connesso · {liveN} asset live</div>
+                </div>
+                <span style={{ fontSize:30 }}>✓</span>
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                {["twelvedata","finnhub","rapidapi","alphavantage"].filter(p => p !== provider).map(p => {
+                  const has = p === "rapidapi" ? rapidKey : p === "finnhub" ? finnKey : p === "twelvedata" ? tdKey : avKey;
+                  const label = p==="finnhub" ? "Finnhub" : p==="rapidapi" ? "RapidAPI" : p==="twelvedata" ? "TwelveData" : "Alpha Vantage";
+                  return (
+                    <button key={p} onClick={()=> has ? (setProvider(p), didAutoLoad.current = false) : (setProvider(p), setConnected(false))}
+                      style={{ background:"#1e3a5f30", color:"#0099ff", border:"1px solid #0099ff40", borderRadius:8, padding:"7px 12px", cursor:"pointer", fontSize:12, fontWeight:700 }}>
+                      ↻ Passa a {label}{has ? "" : " (configura)"}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ ...C.card, background:"#060a10" }}>
+              <div style={{ fontSize:12, fontWeight:700, color:"#64748b", marginBottom:10 }}>AZIONI</div>
+              <button onClick={()=>{
+                if (!window.confirm("Disconnettere e cancellare tutte le chiavi salvate?")) return;
+                setRapidKey(""); setAvKey(""); setFinnKey(""); setTdKey("");
+                setConnected(false);
+                setMktData({}); setErrs({});
+                didAutoLoad.current = false;
+                setTab("setup");
+              }} style={{ background:"#ff475715", color:"#ff4757", border:"1px solid #ff475750", borderRadius:8, padding:"8px 14px", cursor:"pointer", fontSize:12, fontWeight:700 }}>
+                ✕ Disconnetti e dimentica chiavi
+              </button>
+            </div>
+          </div>
+        )}
+
+        {tab === "setup" && !connected && (
           <div style={{ maxWidth:680, margin:"0 auto" }}>
             <h2 style={{ fontSize:22, fontWeight:800, margin:"0 0 4px" }}>⚙️ Configurazione API</h2>
             <p style={{ color:"#64748b", fontSize:13, margin:"0 0 24px" }}>Collega una fonte dati reale per prezzi, RSI e MA live da tutto il mondo.</p>
 
             <div style={{ ...C.card, marginBottom:18 }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", letterSpacing:1, marginBottom:14 }}>SCEGLI PROVIDER</div>
-              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:12 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))", gap:12 }}>
                 {[
-                  { id:"finnhub",      label:"Finnhub",                   badge:"CONSIGLIATO", bc:"#00ff9d", desc:"Free: 60 req/min illimitate. Copre US, ETF, internazionali con suffissi Yahoo. RSI/MA stimati (no storico sul piano free).", link:"https://finnhub.io/register" },
-                  { id:"rapidapi",     label:"Yahoo Finance (RapidAPI)",  badge:"COMPLETO",    bc:"#0099ff", desc:"Yahoo Finance via proxy. Free: 500 req/mese. Storico completo per RSI/MA200 reali.", link:"https://rapidapi.com/manwilbahaa/api/yahoo-finance15" },
-                  { id:"alphavantage", label:"Alpha Vantage",             badge:"BACKUP",      bc:"#ffc107", desc:"API gratuita ufficiale. Free: 25 req/giorno. Ottimo come backup, copertura US.", link:"https://www.alphavantage.co/support/#api-key" },
+                  { id:"twelvedata",   label:"TwelveData",                badge:"CONSIGLIATO", bc:"#00ff9d", desc:"Free: 800 req/giorno, 8 req/min. Copertura globale completa (stocks, ETF, futures, forex, crypto). RSI/MA stimati sul piano free.", link:"https://twelvedata.com/register" },
+                  { id:"finnhub",      label:"Finnhub",                   badge:"VELOCE",      bc:"#0099ff", desc:"Free: 60 req/min illimitate. Solo US stocks/ETF sul piano free. Ottimo per refresh frequenti.", link:"https://finnhub.io/register" },
+                  { id:"rapidapi",     label:"Yahoo (RapidAPI)",          badge:"STORICO",     bc:"#ffc107", desc:"Yahoo Finance via proxy. Free: 500 req/mese. Storico completo per RSI/MA200 reali.", link:"https://rapidapi.com/manwilbahaa/api/yahoo-finance15" },
+                  { id:"alphavantage", label:"Alpha Vantage",             badge:"BACKUP",      bc:"#94a3b8", desc:"API ufficiale. Free: 25 req/giorno. Backup, copertura US.", link:"https://www.alphavantage.co/support/#api-key" },
                 ].map(p => (
                   <div key={p.id} onClick={()=>setProvider(p.id)}
                     style={{ background:provider===p.id?"#0d1d33":"#060a10", border:`2px solid ${provider===p.id?"#0099ff":"#1e3a5f40"}`, borderRadius:12, padding:14, cursor:"pointer" }}>
@@ -735,18 +867,24 @@ export default function App() {
 
             <div style={{ ...C.card, marginBottom:18 }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", letterSpacing:1, marginBottom:12 }}>
-                {provider==="rapidapi" ? "RAPIDAPI KEY (X-RapidAPI-Key)"
-                 : provider==="finnhub" ? "FINNHUB API KEY"
+                {provider==="rapidapi"   ? "RAPIDAPI KEY (X-RapidAPI-Key)"
+                 : provider==="finnhub"  ? "FINNHUB API KEY"
+                 : provider==="twelvedata" ? "TWELVEDATA API KEY"
                  : "ALPHA VANTAGE KEY"}
               </div>
               <div style={{ display:"flex", gap:10 }}>
                 <input type="password"
-                  placeholder={provider==="rapidapi" ? "Incolla la tua RapidAPI key..."
-                             : provider==="finnhub"  ? "Incolla la tua Finnhub API key..."
+                  placeholder={provider==="rapidapi"   ? "Incolla la tua RapidAPI key..."
+                             : provider==="finnhub"   ? "Incolla la tua Finnhub API key..."
+                             : provider==="twelvedata" ? "Incolla la tua TwelveData API key..."
                              : "Incolla la tua Alpha Vantage key..."}
-                  value={provider==="rapidapi" ? rapidKey : provider==="finnhub" ? finnKey : avKey}
-                  onChange={e=> provider==="rapidapi" ? setRapidKey(e.target.value)
-                              : provider==="finnhub"  ? setFinnKey(e.target.value)
+                  value={provider==="rapidapi" ? rapidKey
+                       : provider==="finnhub"  ? finnKey
+                       : provider==="twelvedata" ? tdKey
+                       : avKey}
+                  onChange={e=> provider==="rapidapi"   ? setRapidKey(e.target.value)
+                              : provider==="finnhub"   ? setFinnKey(e.target.value)
+                              : provider==="twelvedata" ? setTdKey(e.target.value)
                               : setAvKey(e.target.value)}
                   style={{ ...C.inp_, flex:1 }} />
                 <button onClick={testConnection} disabled={!activeKey} style={{ background:"#1e3a5f30", color:"#0099ff", border:"1px solid #0099ff40", borderRadius:10, padding:"10px 14px", cursor:activeKey?"pointer":"default", fontWeight:700, fontSize:13, opacity:activeKey?1:.4 }}>🔍 Test</button>
@@ -765,9 +903,17 @@ export default function App() {
 
             <div style={{ ...C.card, background:"#060a10" }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", marginBottom:12 }}>
-                📖 COME OTTENERE LA CHIAVE — {provider==="rapidapi" ? "RAPIDAPI" : provider==="finnhub" ? "FINNHUB" : "ALPHA VANTAGE"}
+                📖 COME OTTENERE LA CHIAVE — {provider==="rapidapi" ? "RAPIDAPI" : provider==="finnhub" ? "FINNHUB" : provider==="twelvedata" ? "TWELVEDATA" : "ALPHA VANTAGE"}
               </div>
-              {provider==="finnhub" ? (
+              {provider==="twelvedata" ? (
+                <ol style={{ color:"#94a3b8", fontSize:12, lineHeight:2.1, paddingLeft:18, margin:0 }}>
+                  <li>Vai su <a href="https://twelvedata.com/register" target="_blank" rel="noopener noreferrer" style={{ color:"#0099ff" }}>twelvedata.com/register</a></li>
+                  <li>Crea account gratuito con email (se hai già un account su un altro bot, riusa la stessa chiave)</li>
+                  <li>Verifica email → dashboard mostra la chiave subito</li>
+                  <li>Limite gratuito: <b style={{ color:"#00ff9d" }}>800 req/giorno, 8 req/min</b></li>
+                  <li>Incollala sopra e clicca Connetti ✓</li>
+                </ol>
+              ) : provider==="finnhub" ? (
                 <ol style={{ color:"#94a3b8", fontSize:12, lineHeight:2.1, paddingLeft:18, margin:0 }}>
                   <li>Vai su <a href="https://finnhub.io/register" target="_blank" rel="noopener noreferrer" style={{ color:"#0099ff" }}>finnhub.io/register</a></li>
                   <li>Crea account gratuito con email</li>
@@ -802,14 +948,21 @@ export default function App() {
             <div style={{ marginBottom:18 }}>
               <h2 style={{ fontSize:22, fontWeight:800, margin:0 }}>Dashboard Globale</h2>
               <p style={{ color:"#64748b", margin:"4px 0 0", fontSize:13 }}>
-                {connected ? `Dati live via ${provider==="rapidapi"?"Yahoo Finance / RapidAPI":provider==="finnhub"?"Finnhub":"Alpha Vantage"}` : "⚠️ Vai in Setup per collegare le API"}
+                {connected ? `Dati live via ${provider==="rapidapi"?"Yahoo Finance / RapidAPI":provider==="finnhub"?"Finnhub":provider==="twelvedata"?"TwelveData":"Alpha Vantage"}` : "⚠️ Vai in Setup per collegare le API"}
               </p>
             </div>
             {Object.keys(errs).length > 0 && (
               <div style={{ background:"#ff475715", border:"1px solid #ff475750", borderRadius:10, padding:"10px 14px", marginBottom:14, fontSize:12, color:"#ff8e9a" }}>
                 ⚠️ <b>Errore caricamento dati</b> ({Object.keys(errs).length} simboli): {Object.values(errs)[0]}
                 <div style={{ color:"#94a3b8", marginTop:6, fontSize:11 }}>
-                  Verifica: 1) chiave RapidAPI valida e iscritta a <b>yahoo-finance15</b>; 2) il proxy <code>/api/proxy</code> è raggiungibile (deploy Vercel con Root Directory = <code>globalbot-lt</code>); 3) non hai superato il limite mensile.
+                  {provider === "twelvedata"
+                    ? <>Verifica: 1) chiave <b>TwelveData</b> valida; 2) il limite 8 req/min potrebbe averti rate-limitato — clicca "Carica" più lentamente o aspetta 1 minuto; 3) limite giornaliero 800 req potrebbe essere stato superato.</>
+                    : provider === "finnhub"
+                    ? <>Il piano <b>Finnhub free</b> copre solo US stocks/ETF. Per ticker internazionali (.T, .HK, .SW, .DE, .NS, .AX) e futures usa <b>TwelveData</b> o <b>RapidAPI</b>.</>
+                    : provider === "rapidapi"
+                    ? <>Verifica: 1) chiave RapidAPI valida e iscritta a <b>yahoo-finance15</b>; 2) il proxy <code>/api/proxy</code> è raggiungibile; 3) non hai superato il limite mensile (500 req).</>
+                    : <>Verifica: 1) chiave <b>Alpha Vantage</b> valida; 2) limite gratuito 25 req/giorno potrebbe essere stato superato (riprova domani).</>
+                  }
                 </div>
               </div>
             )}
@@ -1052,7 +1205,7 @@ export default function App() {
                   <div>💼 Posizioni: <span style={{ color:"#e2e8f0" }}>{portfolio.length}</span></div>
                   <div>📡 Asset live: <span style={{ color:"#e2e8f0" }}>{liveN}</span></div>
                   <div>🎯 BUY signals: <span style={{ color:"#00ff9d" }}>{buyN}</span></div>
-                  <div>⚙️ Provider: <span style={{ color:"#e2e8f0" }}>{connected?(provider==="rapidapi"?"RapidAPI":provider==="finnhub"?"Finnhub":"Alpha Vantage"):"Non conf."}</span></div>
+                  <div>⚙️ Provider: <span style={{ color:"#e2e8f0" }}>{connected?(provider==="rapidapi"?"RapidAPI":provider==="finnhub"?"Finnhub":provider==="twelvedata"?"TwelveData":"Alpha Vantage"):"Non conf."}</span></div>
                 </div>
               </div>
             </div>
