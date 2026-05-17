@@ -436,7 +436,7 @@ export default function App() {
     try {
       const r = await fetch("/api/proxy?url=" + encodeURIComponent("https://httpbin.org/get"));
       if (!r.ok && r.status === 404) {
-        setTestResult({ status: "error", msg: "Il proxy /api/proxy non risponde (404). Su Vercel imposta Root Directory = 'globalbot-lt'. In dev locale (npm start) il proxy non gira: usa 'vercel dev'." });
+        setTestResult({ status: "error", msg: "Il proxy /api/proxy non risponde (404). Il deploy Vercel non sta servendo la function. In dev locale (npm start) il proxy non gira: usa 'vercel dev'." });
         return;
       }
       const d = provider === "rapidapi"
