@@ -98,8 +98,11 @@ async function fetchRapidAPI(symbol, key) {
   const qRes = await fetch(proxyUrl(quoteTarget, key));
   if (!qRes.ok) throw new Error(`RapidAPI ${qRes.status}`);
   const qj = await qRes.json();
-  const q  = qj?.body ?? qj?.quoteResponse?.result?.[0] ?? qj;
-  const price = q.regularMarketPrice ?? q.ask ?? null;
+  const body = qj?.body;
+  const q = Array.isArray(body) ? body[0]
+          : (body && typeof body === "object") ? body
+          : qj?.quoteResponse?.result?.[0] ?? qj;
+  const price = q?.regularMarketPrice ?? q?.ask ?? q?.price ?? null;
   if (!price) throw new Error("No price");
 
   let rsi = 50, ma50 = price, ma200 = price, sparkline = [];
@@ -108,8 +111,9 @@ async function fetchRapidAPI(symbol, key) {
     const hRes = await fetch(proxyUrl(histTarget, key));
     if (hRes.ok) {
       const hj = await hRes.json();
-      const items = Object.values(hj?.body ?? {}).filter(i => i.close).slice(-220).reverse();
-      const closes = items.map(i => parseFloat(i.close)).reverse();
+      const rawItems = Object.values(hj?.body ?? {}).filter(i => i && i.close != null);
+      rawItems.sort((a, b) => (a.date ?? a.timestamp ?? 0) - (b.date ?? b.timestamp ?? 0));
+      const closes = rawItems.slice(-220).map(i => parseFloat(i.close)).filter(n => !isNaN(n));
       if (closes.length > 15) {
         rsi = calcRSI(closes); ma50 = calcMA(closes, 50); ma200 = calcMA(closes, 200);
         sparkline = closes.slice(-24);
@@ -208,9 +212,9 @@ export default function App() {
   const [mktData, setMktData]       = useState({});
   const [loading, setLoading]       = useState(new Set());
   const [errs, setErrs]             = useState({});
-  const [provider, setProvider]     = useState("rapidapi");
-  const [rapidKey, setRapidKey]     = useState("");
-  const [avKey, setAvKey]           = useState("");
+  const [provider, setProvider]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_provider")) || "rapidapi");
+  const [rapidKey, setRapidKey]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_rapidKey")) || "");
+  const [avKey, setAvKey]           = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_avKey")) || "");
   const [connected, setConnected]   = useState(false);
   const [msgs, setMsgs]             = useState([
     { role:"assistant", content:"👋 Sono il tuo AI Trading Bot LT.\n\nConfigura le API in ⚙️ Setup per ricevere dati reali da Yahoo Finance / Alpha Vantage.\n\nPosso analizzare azioni, futures, ETF e materie prime globali con RSI, MA50, MA200 e segnali a lungo termine." }
@@ -246,7 +250,17 @@ export default function App() {
     }
   }, [mkt, fetchOne, provider]);
 
-  const save = () => { setConnected(true); setTab("dashboard"); };
+  const save = () => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("gb_provider", provider);
+      if (rapidKey) localStorage.setItem("gb_rapidKey", rapidKey);
+      if (avKey)    localStorage.setItem("gb_avKey", avKey);
+    }
+    setConnected(true);
+    setTab("dashboard");
+  };
+
+  useEffect(() => { if (activeKey) setConnected(true); }, [activeKey]);
   const get  = s => mktData[s];
   const isL  = s => loading.has(s);
 
@@ -288,16 +302,26 @@ Watchlist: ${watchlist.join(", ")}
 Dati live:\n${live || "nessun dato caricato"}
 Principi: investimento LT, diversificazione globale, gestione rischio disciplinata. Rispondi in modo pratico.`;
       const anthropicUrl = `/api/proxy?url=${encodeURIComponent("https://api.anthropic.com/v1/messages")}`;
+      const history = msgs.filter(m => m.role === "user" || m.role === "assistant").slice(-8);
       const res  = await fetch(anthropicUrl, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, system:sys,
-          messages:[...msgs.slice(-8), { role:"user", content:txt }]
+        body: JSON.stringify({ model:"claude-sonnet-4-5", max_tokens:1000, system:sys,
+          messages:[...history, { role:"user", content:txt }]
         })
       });
       const data = await res.json();
-      const reply = data.content?.map(c=>c.text||"").join("") || "Errore risposta.";
-      setMsgs(p => [...p, { role:"assistant", content:reply }]);
-    } catch { setMsgs(p => [...p, { role:"assistant", content:"⚠️ Errore connessione AI." }]); }
+      let reply;
+      if (data?.content?.length) {
+        reply = data.content.map(c => c.text || "").join("");
+      } else if (data?.error?.message) {
+        reply = `⚠️ ${data.error.message}`;
+      } else {
+        reply = `⚠️ Errore risposta AI (HTTP ${res.status}).`;
+      }
+      setMsgs(p => [...p, { role:"assistant", content: reply || "⚠️ Risposta vuota." }]);
+    } catch (e) {
+      setMsgs(p => [...p, { role:"assistant", content:`⚠️ Errore connessione AI: ${e.message}` }]);
+    }
     setTyping(false);
   };
 
