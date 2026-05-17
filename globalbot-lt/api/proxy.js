@@ -36,18 +36,6 @@ module.exports = async (req, res) => {
     'User-Agent': 'Mozilla/5.0 (GlobalBotLT proxy)',
   };
 
-  if (target.hostname === 'api.anthropic.com') {
-    headers['anthropic-version'] = '2023-06-01';
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicKey) {
-      res.status(500).json({
-        error: { type: 'config_error', message: 'ANTHROPIC_API_KEY non configurata sul server (Vercel → Settings → Environment Variables).' },
-      });
-      return;
-    }
-    headers['x-api-key'] = anthropicKey;
-  }
-
   if (target.hostname.includes('rapidapi')) {
     headers['x-rapidapi-host'] = target.hostname;
     headers['x-rapidapi-key'] = key || '';
