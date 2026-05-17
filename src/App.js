@@ -99,18 +99,41 @@ function pickNum(obj, keys) {
   }
   return null;
 }
+function parseMoney(s) {
+  if (typeof s === "number") return s;
+  if (typeof s !== "string") return null;
+  const m = s.replace(/[$,%+\s]/g, "").match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
 function extractQuote(qj) {
   const body = qj?.body;
-  if (Array.isArray(body) && body.length) return body[0];
-  if (body && typeof body === "object" && !Array.isArray(body)) {
-    const vals = Object.values(body);
-    if (vals.length && typeof vals[0] === "object") return body[Object.keys(body)[0]] || body;
-    return body;
+  let q;
+  if (Array.isArray(body) && body.length) q = body[0];
+  else if (body && typeof body === "object") q = body;
+  else if (qj?.quoteResponse?.result?.[0]) q = qj.quoteResponse.result[0];
+  else if (qj?.data?.[0]) q = qj.data[0];
+  else if (qj && typeof qj === "object" && (qj.regularMarketPrice || qj.price || qj.primaryData)) q = qj;
+  else return null;
+  if (!q || typeof q !== "object") return null;
+
+  // NASDAQ-style nested format (yahoo-finance15 /api/v1/markets/quote) → flatten
+  if (q.primaryData && typeof q.primaryData === "object") {
+    const p  = q.primaryData;
+    const ks = q.keyStats || {};
+    const range52 = ks?.fiftyTwoWeekHighLow?.value || "";
+    const range52Nums = (range52.match(/-?\d+(?:\.\d+)?/g) || []).map(parseFloat);
+    return {
+      symbol: q.symbol,
+      regularMarketPrice:         parseMoney(p.lastSalePrice),
+      regularMarketChange:        parseMoney(p.netChange),
+      regularMarketChangePercent: parseMoney(p.percentageChange),
+      fiftyTwoWeekLow:  range52Nums[0] ?? null,
+      fiftyTwoWeekHigh: range52Nums[1] ?? null,
+      regularMarketVolume: parseMoney(ks?.Volume?.value),
+    };
   }
-  if (qj?.quoteResponse?.result?.[0]) return qj.quoteResponse.result[0];
-  if (qj?.data?.[0]) return qj.data[0];
-  if (qj && typeof qj === "object" && (qj.regularMarketPrice || qj.price)) return qj;
-  return null;
+
+  return q;
 }
 
 async function fetchRapidAPI(symbol, key) {
