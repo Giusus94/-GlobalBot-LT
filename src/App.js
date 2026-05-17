@@ -228,16 +228,52 @@ async function fetchRapidAPI(symbol, key) {
   return d;
 }
 
+const TD_EXCHANGE_MAP = {
+  ".T":  "TYO",   // Tokyo
+  ".AX": "ASX",   // Sydney
+  ".SW": "SIX",   // Swiss
+  ".DE": "XETR",  // Xetra
+  ".HK": "HKEX",  // Hong Kong
+  ".NS": "NSE",   // India NSE
+  ".L":  "LSE",   // London
+};
+const TD_FUTURES_MAP = {
+  "ES=F":  { symbol: "SPX" },          // S&P 500 index
+  "NQ=F":  { symbol: "NDX" },          // Nasdaq-100 index
+  "YM=F":  { symbol: "DJI" },          // Dow Jones index
+  "DAX=F": { symbol: "GDAXI" },        // DAX index
+  "GC=F":  { symbol: "XAU/USD" },      // Gold spot via forex
+  "SI=F":  { symbol: "XAG/USD" },      // Silver spot via forex
+  "CL=F":  { symbol: "WTI/USD" },      // WTI crude
+  "BZ=F":  { symbol: "BRENT/USD" },    // Brent crude
+  "NG=F":  { symbol: "NG=F" },         // fallback
+  "ZW=F":  { symbol: "ZW=F" },
+  "KC=F":  { symbol: "KC=F" },
+  "HG=F":  { symbol: "HG=F" },
+};
+function twelveDataParams(symbol) {
+  if (TD_FUTURES_MAP[symbol]) return TD_FUTURES_MAP[symbol];
+  for (const [suffix, exchange] of Object.entries(TD_EXCHANGE_MAP)) {
+    if (symbol.endsWith(suffix)) {
+      return { symbol: symbol.slice(0, -suffix.length), exchange };
+    }
+  }
+  return { symbol };
+}
+
 async function fetchTwelveData(symbol, key) {
   const ck = `td_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
 
-  const res = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`);
+  const params = twelveDataParams(symbol);
+  const qs = new URLSearchParams({ ...params, apikey: key }).toString();
+  const res = await fetch(`https://api.twelvedata.com/quote?${qs}`);
   if (!res.ok) throw new Error(`TwelveData ${res.status}`);
   const j = await res.json();
   if (j?.status === "error") {
     if (j.code === 401) throw new Error("Chiave TwelveData non valida");
     if (j.code === 429) throw new Error("Limite TwelveData raggiunto (800/giorno o 8/min)");
+    if (j.code === 400) throw new Error(`Simbolo non supportato su TwelveData free: ${symbol}`);
     throw new Error(j.message || "TwelveData errore");
   }
   const price = parseFloat(j?.close);
