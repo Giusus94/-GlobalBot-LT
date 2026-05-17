@@ -703,7 +703,10 @@ export default function App() {
           <span style={{ fontSize:10, color:"#64748b", fontWeight:600, letterSpacing:.5 }}>LONG-TERM AI</span>
         </div>
         <nav style={{ display:"flex", gap:4 }}>
-          {[["setup","⚙️ Setup"],["dashboard","📊 Dashboard"],["markets","🌍 Mercati"],["portfolio","💼 Portafoglio"],["strategies","🧠 Strategie"],["chat","💬 AI Chat"]].map(([t,l])=>(
+          {[
+            ...(connected ? [] : [["setup","⚙️ Setup"]]),
+            ["dashboard","📊 Dashboard"],["markets","🌍 Mercati"],["portfolio","💼 Portafoglio"],["strategies","🧠 Strategie"],["chat","💬 AI Chat"],
+          ].map(([t,l])=>(
             <button key={t} style={C.nav(tab===t)} onClick={()=>setTab(t)}>{l}</button>
           ))}
         </nav>
@@ -711,13 +714,63 @@ export default function App() {
           <span style={{ color:"#64748b" }}>Live: <b style={{ color:"#0099ff" }}>{liveN}</b></span>
           <span style={{ color:"#64748b" }}>BUY: <b style={{ color:"#00ff9d" }}>{buyN}</b></span>
           {connected && <><span style={{ width:8, height:8, borderRadius:"50%", background:"#00ff9d", display:"inline-block", animation:"pulse 2s infinite" }} /><span style={{ color:"#00ff9d", fontWeight:600 }}>LIVE</span></>}
+          {connected && (
+            <button onClick={()=>setTab("setup")} title="Cambia provider o chiave API"
+              style={{ background:"transparent", border:"1px solid #1e3a5f60", color:"#64748b", borderRadius:8, padding:"4px 8px", cursor:"pointer", fontSize:13 }}>⚙️</button>
+          )}
         </div>
       </header>
 
       <div style={{ flex:1, padding:18, maxWidth:1400, margin:"0 auto", width:"100%", boxSizing:"border-box" }}>
 
         {/* SETUP */}
-        {tab === "setup" && (
+        {tab === "setup" && connected && (
+          <div style={{ maxWidth:520, margin:"0 auto" }}>
+            <h2 style={{ fontSize:22, fontWeight:800, margin:"0 0 4px" }}>⚙️ Provider attivo</h2>
+            <p style={{ color:"#64748b", fontSize:13, margin:"0 0 24px" }}>Stai usando una fonte dati reale. Puoi cambiare provider o disconnettere.</p>
+
+            <div style={{ ...C.card, marginBottom:14 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+                <div>
+                  <div style={{ fontSize:10, color:"#64748b", fontWeight:700, letterSpacing:1, marginBottom:4 }}>PROVIDER ATTIVO</div>
+                  <div style={{ fontSize:18, fontWeight:800, color:"#00ff9d" }}>
+                    {provider==="finnhub" ? "Finnhub" : provider==="rapidapi" ? "Yahoo Finance · RapidAPI" : "Alpha Vantage"}
+                  </div>
+                  <div style={{ fontSize:11, color:"#64748b", marginTop:4 }}>● Connesso · {liveN} asset live</div>
+                </div>
+                <span style={{ fontSize:30 }}>✓</span>
+              </div>
+              <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                {["finnhub","rapidapi","alphavantage"].filter(p => p !== provider).map(p => {
+                  const has = p === "rapidapi" ? rapidKey : p === "finnhub" ? finnKey : avKey;
+                  const label = p==="finnhub" ? "Finnhub" : p==="rapidapi" ? "RapidAPI" : "Alpha Vantage";
+                  return (
+                    <button key={p} onClick={()=> has ? (setProvider(p), didAutoLoad.current = false) : (setProvider(p), setConnected(false))}
+                      style={{ background:"#1e3a5f30", color:"#0099ff", border:"1px solid #0099ff40", borderRadius:8, padding:"7px 12px", cursor:"pointer", fontSize:12, fontWeight:700 }}>
+                      ↻ Passa a {label}{has ? "" : " (configura)"}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ ...C.card, background:"#060a10" }}>
+              <div style={{ fontSize:12, fontWeight:700, color:"#64748b", marginBottom:10 }}>AZIONI</div>
+              <button onClick={()=>{
+                if (!window.confirm("Disconnettere e cancellare tutte le chiavi salvate?")) return;
+                setRapidKey(""); setAvKey(""); setFinnKey("");
+                setConnected(false);
+                setMktData({}); setErrs({});
+                didAutoLoad.current = false;
+                setTab("setup");
+              }} style={{ background:"#ff475715", color:"#ff4757", border:"1px solid #ff475750", borderRadius:8, padding:"8px 14px", cursor:"pointer", fontSize:12, fontWeight:700 }}>
+                ✕ Disconnetti e dimentica chiavi
+              </button>
+            </div>
+          </div>
+        )}
+
+        {tab === "setup" && !connected && (
           <div style={{ maxWidth:680, margin:"0 auto" }}>
             <h2 style={{ fontSize:22, fontWeight:800, margin:"0 0 4px" }}>⚙️ Configurazione API</h2>
             <p style={{ color:"#64748b", fontSize:13, margin:"0 0 24px" }}>Collega una fonte dati reale per prezzi, RSI e MA live da tutto il mondo.</p>
