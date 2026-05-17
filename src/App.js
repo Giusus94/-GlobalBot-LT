@@ -2,46 +2,56 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const MARKETS = {
   shares: [
-    { symbol: "AAPL",       name: "Apple Inc.",         market: "NASDAQ", currency: "USD", sector: "Tech"     },
-    { symbol: "MSFT",       name: "Microsoft Corp.",     market: "NASDAQ", currency: "USD", sector: "Tech"     },
-    { symbol: "NVDA",       name: "NVIDIA Corp.",        market: "NASDAQ", currency: "USD", sector: "Tech"     },
-    { symbol: "ASML",       name: "ASML Holding",        market: "AMS",    currency: "EUR", sector: "Tech"     },
-    { symbol: "7203.T",     name: "Toyota Motor",        market: "TSE",    currency: "JPY", sector: "Auto"     },
-    { symbol: "BHP.AX",     name: "BHP Group",           market: "ASX",    currency: "AUD", sector: "Mining"   },
-    { symbol: "NESN.SW",    name: "Nestlé S.A.",         market: "SIX",    currency: "CHF", sector: "Consumer" },
-    { symbol: "SAP.DE",     name: "SAP SE",              market: "XETRA",  currency: "EUR", sector: "Tech"     },
-    { symbol: "2318.HK",    name: "Ping An Insurance",   market: "HKEX",   currency: "HKD", sector: "Finance"  },
-    { symbol: "RELIANCE.NS",name: "Reliance Industries", market: "NSE",    currency: "INR", sector: "Energy"   },
+    // Tutti US-listed (azioni native + ADR di internazionali) → TwelveData free ok
+    { symbol: "AAPL",  name: "Apple Inc.",            market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "MSFT",  name: "Microsoft Corp.",       market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "NVDA",  name: "NVIDIA Corp.",          market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "GOOGL", name: "Alphabet Inc.",         market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "AMZN",  name: "Amazon.com",            market: "NASDAQ", currency: "USD", sector: "Consumer" },
+    { symbol: "META",  name: "Meta Platforms",        market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "TSLA",  name: "Tesla Inc.",            market: "NASDAQ", currency: "USD", sector: "Auto"     },
+    { symbol: "ASML",  name: "ASML Holding (ADR)",    market: "NASDAQ", currency: "USD", sector: "Tech"     },
+    { symbol: "TSM",   name: "TSMC (ADR)",            market: "NYSE",   currency: "USD", sector: "Tech"     },
+    { symbol: "TM",    name: "Toyota Motor (ADR)",    market: "NYSE",   currency: "USD", sector: "Auto"     },
+    { symbol: "BHP",   name: "BHP Group (ADR)",       market: "NYSE",   currency: "USD", sector: "Mining"   },
+    { symbol: "NVS",   name: "Novartis (ADR)",        market: "NYSE",   currency: "USD", sector: "Pharma"   },
   ],
   futures: [
-    { symbol: "ES=F",  name: "S&P 500 Futures",    market: "CME",   currency: "USD", sector: "Index"  },
-    { symbol: "NQ=F",  name: "Nasdaq-100 Futures", market: "CME",   currency: "USD", sector: "Index"  },
-    { symbol: "YM=F",  name: "Dow Jones Futures",  market: "CME",   currency: "USD", sector: "Index"  },
-    { symbol: "DAX=F", name: "DAX Futures",        market: "EUREX", currency: "EUR", sector: "Index"  },
-    { symbol: "CL=F",  name: "Crude Oil (WTI)",    market: "NYMEX", currency: "USD", sector: "Energy" },
-    { symbol: "GC=F",  name: "Gold Futures",       market: "COMEX", currency: "USD", sector: "Metals" },
-    { symbol: "SI=F",  name: "Silver Futures",     market: "COMEX", currency: "USD", sector: "Metals" },
-    { symbol: "NG=F",  name: "Natural Gas",        market: "NYMEX", currency: "USD", sector: "Energy" },
+    // Indici come sottostanti dei futures (TwelveData supporta indici cash)
+    { symbol: "SPX",      name: "S&P 500 Index",      market: "CBOE",   currency: "USD", sector: "Index"  },
+    { symbol: "NDX",      name: "Nasdaq-100 Index",   market: "NASDAQ", currency: "USD", sector: "Index"  },
+    { symbol: "DJI",      name: "Dow Jones Index",    market: "NYSE",   currency: "USD", sector: "Index"  },
+    { symbol: "RUT",      name: "Russell 2000",       market: "CBOE",   currency: "USD", sector: "Index"  },
+    // Commodity tramite forex spot (TwelveData free supporta XAU, XAG, WTI, BRENT)
+    { symbol: "WTI/USD",  name: "WTI Crude Oil Spot", market: "FX",     currency: "USD", sector: "Energy" },
+    { symbol: "BRENT/USD",name: "Brent Crude Spot",   market: "FX",     currency: "USD", sector: "Energy" },
+    { symbol: "XAU/USD",  name: "Gold Spot",          market: "FX",     currency: "USD", sector: "Metals" },
+    { symbol: "XAG/USD",  name: "Silver Spot",        market: "FX",     currency: "USD", sector: "Metals" },
   ],
   etf: [
-    { symbol: "VOO",  name: "Vanguard S&P 500 ETF",   market: "NYSE",   currency: "USD", sector: "Index" },
-    { symbol: "QQQ",  name: "Invesco QQQ Trust",       market: "NASDAQ", currency: "USD", sector: "Tech"  },
-    { symbol: "VWO",  name: "Vanguard Emerging Mkts",  market: "NYSE",   currency: "USD", sector: "EM"    },
-    { symbol: "EWJ",  name: "iShares MSCI Japan",      market: "NYSE",   currency: "USD", sector: "Japan" },
-    { symbol: "GLD",  name: "SPDR Gold Shares",        market: "NYSE",   currency: "USD", sector: "Gold"  },
-    { symbol: "TLT",  name: "iShares 20yr Treasury",   market: "NASDAQ", currency: "USD", sector: "Bonds" },
-    { symbol: "VNQ",  name: "Vanguard Real Estate",    market: "NYSE",   currency: "USD", sector: "REIT"  },
-    { symbol: "ARKK", name: "ARK Innovation ETF",      market: "NYSE",   currency: "USD", sector: "Tech"  },
+    { symbol: "VOO",  name: "Vanguard S&P 500 ETF",     market: "NYSE",   currency: "USD", sector: "Index" },
+    { symbol: "QQQ",  name: "Invesco QQQ Trust",        market: "NASDAQ", currency: "USD", sector: "Tech"  },
+    { symbol: "VWO",  name: "Vanguard Emerging Mkts",   market: "NYSE",   currency: "USD", sector: "EM"    },
+    { symbol: "EWJ",  name: "iShares MSCI Japan",       market: "NYSE",   currency: "USD", sector: "Japan" },
+    { symbol: "VEA",  name: "Vanguard Developed Mkts",  market: "NYSE",   currency: "USD", sector: "Intl"  },
+    { symbol: "EFA",  name: "iShares MSCI EAFE",        market: "NYSE",   currency: "USD", sector: "Intl"  },
+    { symbol: "GLD",  name: "SPDR Gold Shares",         market: "NYSE",   currency: "USD", sector: "Gold"  },
+    { symbol: "TLT",  name: "iShares 20yr Treasury",    market: "NASDAQ", currency: "USD", sector: "Bonds" },
+    { symbol: "VNQ",  name: "Vanguard Real Estate",     market: "NYSE",   currency: "USD", sector: "REIT"  },
+    { symbol: "ARKK", name: "ARK Innovation ETF",       market: "NYSE",   currency: "USD", sector: "Tech"  },
   ],
   commodities: [
-    { symbol: "GC=F", name: "Gold Futures",   market: "COMEX", currency: "USD", sector: "Metals" },
-    { symbol: "SI=F", name: "Silver Futures", market: "COMEX", currency: "USD", sector: "Metals" },
-    { symbol: "CL=F", name: "Crude Oil WTI",  market: "NYMEX", currency: "USD", sector: "Energy" },
-    { symbol: "BZ=F", name: "Brent Crude",    market: "ICE",   currency: "USD", sector: "Energy" },
-    { symbol: "NG=F", name: "Natural Gas",    market: "NYMEX", currency: "USD", sector: "Energy" },
-    { symbol: "ZW=F", name: "Wheat Futures",  market: "CBOT",  currency: "USD", sector: "Agri"   },
-    { symbol: "KC=F", name: "Coffee Futures", market: "ICE",   currency: "USD", sector: "Agri"   },
-    { symbol: "HG=F", name: "Copper Futures", market: "COMEX", currency: "USD", sector: "Metals" },
+    // Spot via forex per metalli ed energia, ETF per le altre commodity
+    { symbol: "XAU/USD",  name: "Gold Spot",            market: "FX",   currency: "USD", sector: "Metals" },
+    { symbol: "XAG/USD",  name: "Silver Spot",          market: "FX",   currency: "USD", sector: "Metals" },
+    { symbol: "WTI/USD",  name: "WTI Crude Oil Spot",   market: "FX",   currency: "USD", sector: "Energy" },
+    { symbol: "BRENT/USD",name: "Brent Crude Spot",     market: "FX",   currency: "USD", sector: "Energy" },
+    { symbol: "USO",      name: "US Oil Fund (ETF)",    market: "NYSE", currency: "USD", sector: "Energy" },
+    { symbol: "UNG",      name: "Natural Gas ETF",      market: "NYSE", currency: "USD", sector: "Energy" },
+    { symbol: "WEAT",     name: "Wheat ETF",            market: "NYSE", currency: "USD", sector: "Agri"   },
+    { symbol: "JO",       name: "Coffee ETF",           market: "NYSE", currency: "USD", sector: "Agri"   },
+    { symbol: "CPER",     name: "Copper ETF",           market: "NYSE", currency: "USD", sector: "Metals" },
+    { symbol: "DBA",      name: "Agriculture ETF",      market: "NYSE", currency: "USD", sector: "Agri"   },
   ],
 };
 
@@ -488,8 +498,8 @@ Operatività: ${STRATEGY_TIPS[strat.id] || "—"}`;
     return `🌍 Diversificazione LT bilanciata:
 • 40-50% azioni globali (VOO + VWO + EWJ)
 • 20-30% bond lungo termine (TLT)
-• 10-15% oro (GLD / GC=F)
-• 5-10% commodity reali (CL=F, HG=F, ZW=F)
+• 10-15% oro (GLD / XAU/USD)
+• 5-10% commodity reali (USO, CPER, WEAT)
 • 5-10% real estate (VNQ)
 
 Le commodity offrono protezione da inflazione e bassa correlazione con equity. In ottica All Weather sono strutturali, non tattiche.`;
@@ -508,7 +518,7 @@ Strategia consigliata: All Weather o Value Investing.`;
 
   if (/difensiv|orso|bear|crash|drawdown|caduta/i.test(ql)) {
     return `🛡️ Asset difensivi per fase orso:
-• Oro (GLD, GC=F) — hedge classico
+• Oro (GLD, XAU/USD) — hedge classico
 • Bond long duration (TLT) — risk-off rally
 • Consumer staples (NESN.SW)
 • Utilities & healthcare
@@ -518,8 +528,8 @@ Riduci leva, aumenta liquidità, evita small cap speculative. Strategia All Weat
   }
 
   if (/tech|energy|energia|settor/i.test(ql)) {
-    const techSyms = ["AAPL","MSFT","NVDA","ASML","SAP.DE","QQQ","ARKK"];
-    const enSyms   = ["CL=F","BZ=F","NG=F"];
+    const techSyms = ["AAPL","MSFT","NVDA","ASML","GOOGL","QQQ","ARKK"];
+    const enSyms   = ["WTI/USD","BRENT/USD","USO","UNG"];
     const summarize = (syms) => {
       const ds = syms.map(s => mktData[s]).filter(Boolean);
       if (!ds.length) return "dati non caricati";
@@ -562,7 +572,7 @@ Tech: rendimenti storici superiori ma drawdown più ampi. Energy: dividendi alti
 
   return `Non ho riconosciuto la domanda. Posso aiutarti su:
 
-📊 Analisi simbolo — scrivi un ticker (es. AAPL, VOO, GC=F)
+📊 Analisi simbolo — scrivi un ticker (es. AAPL, VOO, SPX, XAU/USD)
 📈 Segnali BUY — "mostra opportunità BUY"
 💼 Portafoglio — "analizza il portafoglio"
 🧠 Strategia — "spiega la strategia"
@@ -584,7 +594,7 @@ export default function App() {
   const [mkt, setMkt]               = useState("shares");
   const [strat, setStrat]           = useState(STRATEGIES[0]);
   const [portfolio, setPortfolio]   = useState([]);
-  const [watchlist, setWatchlist]   = useState(["AAPL","VOO","GLD","ES=F"]);
+  const [watchlist, setWatchlist]   = useState(["AAPL","VOO","GLD","SPX"]);
   const [filter, setFilter]         = useState("ALL");
   const [mktData, setMktData]       = useState({});
   const [loading, setLoading]       = useState(new Set());
