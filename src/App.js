@@ -105,16 +105,26 @@ function parseMoney(s) {
   const m = s.replace(/[$,%+\s]/g, "").match(/-?\d+(\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
+function categoryOf(symbol) {
+  for (const [cat, list] of Object.entries(MARKETS)) {
+    if (list.some(a => a.symbol === symbol)) return cat;
+  }
+  return "shares";
+}
+function isInternational(symbol) {
+  return /\.[A-Z]{1,3}$/.test(symbol);
+}
+
 function extractQuote(qj) {
   const body = qj?.body;
   let q;
   if (Array.isArray(body) && body.length) q = body[0];
-  else if (body && typeof body === "object") q = body;
+  else if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).length) q = body;
   else if (qj?.quoteResponse?.result?.[0]) q = qj.quoteResponse.result[0];
   else if (qj?.data?.[0]) q = qj.data[0];
   else if (qj && typeof qj === "object" && (qj.regularMarketPrice || qj.price || qj.primaryData)) q = qj;
   else return null;
-  if (!q || typeof q !== "object") return null;
+  if (!q || typeof q !== "object" || (Array.isArray(q) ? q.length === 0 : Object.keys(q).length === 0)) return null;
 
   // NASDAQ-style nested format (yahoo-finance15 /api/v1/markets/quote) → flatten
   if (q.primaryData && typeof q.primaryData === "object") {
@@ -136,18 +146,51 @@ function extractQuote(qj) {
   return q;
 }
 
+async function fetchQuoteV1(symbol, type, key) {
+  const url = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=${encodeURIComponent(symbol)}&type=${type}`;
+  const r = await fetch(proxyUrl(url, key));
+  if (!r.ok) return null;
+  return extractQuote(await r.json());
+}
+async function fetchQuoteYahoo(symbol, key) {
+  const url = `https://yahoo-finance15.p.rapidapi.com/api/yahoo/qu/quote/${encodeURIComponent(symbol)}`;
+  const r = await fetch(proxyUrl(url, key));
+  if (!r.ok) return null;
+  const j = await r.json();
+  if (Array.isArray(j) && j.length) return j[0];
+  if (j?.quoteResponse?.result?.[0]) return j.quoteResponse.result[0];
+  if (Array.isArray(j?.body) && j.body.length) return j.body[0];
+  if (j?.body && typeof j.body === "object") return j.body;
+  if (j && typeof j === "object" && (j.regularMarketPrice || j.price)) return j;
+  return null;
+}
+
 async function fetchRapidAPI(symbol, key) {
   const ck = `r_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
 
-  const quoteTarget = `https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=${encodeURIComponent(symbol)}&type=STOCKS`;
-  const qRes = await fetch(proxyUrl(quoteTarget, key));
-  if (!qRes.ok) throw new Error(`RapidAPI ${qRes.status}`);
-  const qj = await qRes.json();
-  const q = extractQuote(qj);
-  if (!q) throw new Error(`Risposta vuota da Yahoo (${JSON.stringify(qj).slice(0, 120)})`);
+  const cat = categoryOf(symbol);
+  const v1Type = cat === "etf" ? "ETF"
+              : (cat === "futures" || cat === "commodities") ? "FUTURES"
+              : "STOCKS";
+  const useYahooFirst = isInternational(symbol);
+
+  const tryGet = async () => {
+    if (useYahooFirst) {
+      const q = await fetchQuoteYahoo(symbol, key);
+      if (q && pickNum(q, ["regularMarketPrice","price","ask","last","lastPrice","close"]) != null) return q;
+      return await fetchQuoteV1(symbol, v1Type, key);
+    } else {
+      const q = await fetchQuoteV1(symbol, v1Type, key);
+      if (q && pickNum(q, ["regularMarketPrice","price","ask","last","lastPrice","close"]) != null) return q;
+      return await fetchQuoteYahoo(symbol, key);
+    }
+  };
+
+  const q = await tryGet();
+  if (!q) throw new Error("Simbolo non disponibile sui due endpoint RapidAPI");
   const price = pickNum(q, ["regularMarketPrice","price","ask","last","lastPrice","close"]);
-  if (price == null) throw new Error(`Campo prezzo assente. Campi: ${Object.keys(q).slice(0,10).join(", ")}`);
+  if (price == null) throw new Error(`Campo prezzo assente. Campi: ${Object.keys(q).slice(0,10).join(", ") || "vuoto"}`);
 
   let rsi = 50, ma50 = price, ma200 = price, sparkline = [];
   try {
