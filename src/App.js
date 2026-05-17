@@ -233,7 +233,8 @@ async function fetchFinnhub(symbol, key) {
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
 
   const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(key)}`);
-  if (res.status === 401 || res.status === 403) throw new Error("Chiave Finnhub non valida");
+  if (res.status === 401) throw new Error("Chiave Finnhub non valida");
+  if (res.status === 403) throw new Error("Simbolo non incluso nel piano Finnhub free (probabile exchange premium)");
   if (res.status === 429) throw new Error("Finnhub rate limit (60 req/min)");
   if (!res.ok) throw new Error(`Finnhub ${res.status}`);
   const j = await res.json();
@@ -497,9 +498,13 @@ Tech: rendimenti storici superiori ma drawdown più ampi. Energy: dividendi alti
 ⭐ Watchlist — "mostra watchlist"`;
 }
 
+const lsGet = (k, fb = "") => (typeof localStorage !== "undefined" && localStorage.getItem(k)) || fb;
+const lsSet = (k, v) => { if (typeof localStorage !== "undefined") localStorage.setItem(k, v); };
+
 // ── MAIN ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab]               = useState("setup");
+  const hasStoredKey = !!(lsGet("gb_rapidKey") || lsGet("gb_avKey") || lsGet("gb_finnKey"));
+  const [tab, setTab]               = useState(hasStoredKey ? "dashboard" : "setup");
   const [mkt, setMkt]               = useState("shares");
   const [strat, setStrat]           = useState(STRATEGIES[0]);
   const [portfolio, setPortfolio]   = useState([]);
@@ -508,10 +513,14 @@ export default function App() {
   const [mktData, setMktData]       = useState({});
   const [loading, setLoading]       = useState(new Set());
   const [errs, setErrs]             = useState({});
-  const [provider, setProvider]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_provider")) || "rapidapi");
-  const [rapidKey, setRapidKey]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_rapidKey")) || "");
-  const [avKey, setAvKey]           = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_avKey")) || "");
-  const [finnKey, setFinnKey]       = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_finnKey")) || "");
+  const [provider, _setProvider]    = useState(() => lsGet("gb_provider", "rapidapi"));
+  const [rapidKey, _setRapidKey]    = useState(() => lsGet("gb_rapidKey"));
+  const [avKey, _setAvKey]          = useState(() => lsGet("gb_avKey"));
+  const [finnKey, _setFinnKey]      = useState(() => lsGet("gb_finnKey"));
+  const setProvider = (v) => { _setProvider(v); lsSet("gb_provider", v); };
+  const setRapidKey = (v) => { _setRapidKey(v); lsSet("gb_rapidKey", v); };
+  const setAvKey    = (v) => { _setAvKey(v);    lsSet("gb_avKey", v); };
+  const setFinnKey  = (v) => { _setFinnKey(v);  lsSet("gb_finnKey", v); };
   const [connected, setConnected]   = useState(false);
   const [msgs, setMsgs]             = useState([
     { role:"assistant", content:"👋 Sono il tuo Trading Bot LT con AI locale.\n\nAnalizzo i dati live (RSI, MA50, MA200, score) e ti aiuto con strategie, diversificazione, segnali BUY e scenari macro — senza bisogno di chiavi esterne per la chat.\n\nProva: scrivi un ticker (\"AAPL\"), oppure \"mostra opportunità BUY\" o \"analizza il portafoglio\"." }
@@ -556,16 +565,18 @@ export default function App() {
   }, [mkt, fetchOne, provider]);
 
   const save = () => {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("gb_provider", provider);
-      if (rapidKey) localStorage.setItem("gb_rapidKey", rapidKey);
-      if (avKey)    localStorage.setItem("gb_avKey", avKey);
-      if (finnKey)  localStorage.setItem("gb_finnKey", finnKey);
-    }
     setConnected(true);
     setTab("dashboard");
     setTimeout(() => { watchlist.forEach(sym => fetchOne(sym)); }, 50);
   };
+
+  const didAutoLoad = useRef(false);
+  useEffect(() => {
+    if (didAutoLoad.current || !activeKey) return;
+    didAutoLoad.current = true;
+    setConnected(true);
+    watchlist.forEach(sym => fetchOne(sym));
+  }, [activeKey, fetchOne, watchlist]);
 
   const testConnection = async () => {
     if (!activeKey) return;
@@ -630,7 +641,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => { if (activeKey) setConnected(true); }, [activeKey]);
   const get  = s => mktData[s];
   const isL  = s => loading.has(s);
 
@@ -809,7 +819,12 @@ export default function App() {
               <div style={{ background:"#ff475715", border:"1px solid #ff475750", borderRadius:10, padding:"10px 14px", marginBottom:14, fontSize:12, color:"#ff8e9a" }}>
                 ⚠️ <b>Errore caricamento dati</b> ({Object.keys(errs).length} simboli): {Object.values(errs)[0]}
                 <div style={{ color:"#94a3b8", marginTop:6, fontSize:11 }}>
-                  Verifica: 1) chiave RapidAPI valida e iscritta a <b>yahoo-finance15</b>; 2) il proxy <code>/api/proxy</code> è raggiungibile (deploy Vercel con Root Directory = <code>globalbot-lt</code>); 3) non hai superato il limite mensile.
+                  {provider === "finnhub"
+                    ? <>Il piano <b>Finnhub free</b> copre solo US stocks/ETF. Per ticker internazionali (.T, .HK, .SW, .DE, .NS, .AX) e futures usa <b>RapidAPI</b> come provider.</>
+                    : provider === "rapidapi"
+                    ? <>Verifica: 1) chiave RapidAPI valida e iscritta a <b>yahoo-finance15</b>; 2) il proxy <code>/api/proxy</code> è raggiungibile; 3) non hai superato il limite mensile (500 req).</>
+                    : <>Verifica: 1) chiave <b>Alpha Vantage</b> valida; 2) limite gratuito 25 req/giorno potrebbe essere stato superato (riprova domani).</>
+                  }
                 </div>
               </div>
             )}
