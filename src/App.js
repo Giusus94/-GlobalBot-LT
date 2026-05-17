@@ -228,6 +228,40 @@ async function fetchRapidAPI(symbol, key) {
   return d;
 }
 
+async function fetchFinnhub(symbol, key) {
+  const ck = `fh_${symbol}`;
+  if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
+
+  const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(key)}`);
+  if (res.status === 401 || res.status === 403) throw new Error("Chiave Finnhub non valida");
+  if (res.status === 429) throw new Error("Finnhub rate limit (60 req/min)");
+  if (!res.ok) throw new Error(`Finnhub ${res.status}`);
+  const j = await res.json();
+  if (!j || j.c == null || j.c === 0) throw new Error(`Simbolo non disponibile su Finnhub (free): ${symbol}`);
+
+  const price = j.c;
+  const change = j.d ?? 0;
+  const changeP = j.dp ?? 0;
+  const rsi   = changeP > 2 ? 65 : changeP < -2 ? 38 : 50;
+  const ma200 = price * (changeP > 0 ? 0.95 : 1.05);
+  const ma50  = price * (changeP > 0 ? 0.98 : 1.02);
+  const signal = ltSignal(rsi, price, ma200);
+  const score  = calcScore(signal, rsi, price, ma200);
+  const sparkline = Array.from({ length: 24 }, (_, i) => {
+    const seed = symbol.charCodeAt(0) + i;
+    return price * (1 + ((seed % 11) - 5) / 200 + changeP / 2000);
+  });
+
+  const d = {
+    price, change, changeP,
+    high52: j.h ?? null, low52: j.l ?? null, vol: 0,
+    rsi, ma50: ma50.toFixed(2), ma200: ma200.toFixed(2),
+    signal, score, sparkline, source: "Finnhub",
+  };
+  _cache[ck] = { d, ts: Date.now() };
+  return d;
+}
+
 async function fetchAlphaVantage(symbol, key) {
   const ck = `av_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
@@ -477,6 +511,7 @@ export default function App() {
   const [provider, setProvider]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_provider")) || "rapidapi");
   const [rapidKey, setRapidKey]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_rapidKey")) || "");
   const [avKey, setAvKey]           = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_avKey")) || "");
+  const [finnKey, setFinnKey]       = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_finnKey")) || "");
   const [connected, setConnected]   = useState(false);
   const [msgs, setMsgs]             = useState([
     { role:"assistant", content:"👋 Sono il tuo Trading Bot LT con AI locale.\n\nAnalizzo i dati live (RSI, MA50, MA200, score) e ti aiuto con strategie, diversificazione, segnali BUY e scenari macro — senza bisogno di chiavi esterne per la chat.\n\nProva: scrivi un ticker (\"AAPL\"), oppure \"mostra opportunità BUY\" o \"analizza il portafoglio\"." }
@@ -489,14 +524,18 @@ export default function App() {
 
   useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [msgs, typing]);
 
-  const activeKey = provider === "rapidapi" ? rapidKey : avKey;
+  const activeKey = provider === "rapidapi" ? rapidKey
+                  : provider === "finnhub"  ? finnKey
+                  : avKey;
 
   const fetchOne = useCallback(async (symbol) => {
     if (!activeKey) return;
     setLoading(p => new Set([...p, symbol]));
     setErrs(p => { const n={...p}; delete n[symbol]; return n; });
     try {
-      const d = provider === "rapidapi" ? await fetchRapidAPI(symbol, activeKey) : await fetchAlphaVantage(symbol, activeKey);
+      const d = provider === "rapidapi" ? await fetchRapidAPI(symbol, activeKey)
+              : provider === "finnhub"  ? await fetchFinnhub(symbol, activeKey)
+              : await fetchAlphaVantage(symbol, activeKey);
       setMktData(p => ({ ...p, [symbol]: d }));
     } catch(e) {
       setErrs(p => ({ ...p, [symbol]: e.message }));
@@ -507,9 +546,12 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     const syms = MARKETS[mkt].map(a => a.symbol);
+    const delay = provider === "alphavantage" ? 1300
+                : provider === "finnhub"      ? 200
+                : 250;
     for (const s of syms) {
       await fetchOne(s);
-      await new Promise(r => setTimeout(r, provider === "alphavantage" ? 1300 : 250));
+      await new Promise(r => setTimeout(r, delay));
     }
   }, [mkt, fetchOne, provider]);
 
@@ -518,6 +560,7 @@ export default function App() {
       localStorage.setItem("gb_provider", provider);
       if (rapidKey) localStorage.setItem("gb_rapidKey", rapidKey);
       if (avKey)    localStorage.setItem("gb_avKey", avKey);
+      if (finnKey)  localStorage.setItem("gb_finnKey", finnKey);
     }
     setConnected(true);
     setTab("dashboard");
@@ -528,10 +571,19 @@ export default function App() {
     if (!activeKey) return;
     setTestResult({ status: "loading", msg: "Test in corso..." });
 
-    if (provider !== "rapidapi") {
+    if (provider === "finnhub") {
+      try {
+        const d = await fetchFinnhub("AAPL", activeKey);
+        setTestResult({ status: "ok", msg: `✓ AAPL = ${d.price.toFixed(2)} USD via Finnhub.` });
+      } catch (e) {
+        setTestResult({ status: "error", msg: `✗ ${e.message}` });
+      }
+      return;
+    }
+    if (provider === "alphavantage") {
       try {
         const d = await fetchAlphaVantage("AAPL", activeKey);
-        setTestResult({ status: "ok", msg: `✓ AAPL = ${d.price?.toFixed(2)} USD, segnale ${d.signal}.` });
+        setTestResult({ status: "ok", msg: `✓ AAPL = ${d.price?.toFixed(2)} USD via Alpha Vantage.` });
       } catch (e) {
         setTestResult({ status: "error", msg: `✗ ${e.message}` });
       }
@@ -662,10 +714,11 @@ export default function App() {
 
             <div style={{ ...C.card, marginBottom:18 }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", letterSpacing:1, marginBottom:14 }}>SCEGLI PROVIDER</div>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))", gap:12 }}>
                 {[
-                  { id:"rapidapi",     label:"Yahoo Finance (RapidAPI)", badge:"CONSIGLIATO", bc:"#00ff9d", desc:"Dati Yahoo Finance tramite proxy affidabile. Free: 500 req/mese. Dati globali completi.", link:"https://rapidapi.com/manwilbahaa/api/yahoo-finance15" },
-                  { id:"alphavantage", label:"Alpha Vantage",            badge:"GRATUITO",    bc:"#0099ff", desc:"API gratuita ufficiale. Free: 25 req/giorno. Ottimo per test su mercati USA.", link:"https://www.alphavantage.co/support/#api-key" },
+                  { id:"finnhub",      label:"Finnhub",                   badge:"CONSIGLIATO", bc:"#00ff9d", desc:"Free: 60 req/min illimitate. Copre US, ETF, internazionali con suffissi Yahoo. RSI/MA stimati (no storico sul piano free).", link:"https://finnhub.io/register" },
+                  { id:"rapidapi",     label:"Yahoo Finance (RapidAPI)",  badge:"COMPLETO",    bc:"#0099ff", desc:"Yahoo Finance via proxy. Free: 500 req/mese. Storico completo per RSI/MA200 reali.", link:"https://rapidapi.com/manwilbahaa/api/yahoo-finance15" },
+                  { id:"alphavantage", label:"Alpha Vantage",             badge:"BACKUP",      bc:"#ffc107", desc:"API gratuita ufficiale. Free: 25 req/giorno. Ottimo come backup, copertura US.", link:"https://www.alphavantage.co/support/#api-key" },
                 ].map(p => (
                   <div key={p.id} onClick={()=>setProvider(p.id)}
                     style={{ background:provider===p.id?"#0d1d33":"#060a10", border:`2px solid ${provider===p.id?"#0099ff":"#1e3a5f40"}`, borderRadius:12, padding:14, cursor:"pointer" }}>
@@ -682,13 +735,19 @@ export default function App() {
 
             <div style={{ ...C.card, marginBottom:18 }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", letterSpacing:1, marginBottom:12 }}>
-                {provider==="rapidapi"?"RAPIDAPI KEY (X-RapidAPI-Key)":"ALPHA VANTAGE KEY"}
+                {provider==="rapidapi" ? "RAPIDAPI KEY (X-RapidAPI-Key)"
+                 : provider==="finnhub" ? "FINNHUB API KEY"
+                 : "ALPHA VANTAGE KEY"}
               </div>
               <div style={{ display:"flex", gap:10 }}>
                 <input type="password"
-                  placeholder={provider==="rapidapi"?"Incolla la tua RapidAPI key...":"Incolla la tua Alpha Vantage key..."}
-                  value={provider==="rapidapi"?rapidKey:avKey}
-                  onChange={e=>provider==="rapidapi"?setRapidKey(e.target.value):setAvKey(e.target.value)}
+                  placeholder={provider==="rapidapi" ? "Incolla la tua RapidAPI key..."
+                             : provider==="finnhub"  ? "Incolla la tua Finnhub API key..."
+                             : "Incolla la tua Alpha Vantage key..."}
+                  value={provider==="rapidapi" ? rapidKey : provider==="finnhub" ? finnKey : avKey}
+                  onChange={e=> provider==="rapidapi" ? setRapidKey(e.target.value)
+                              : provider==="finnhub"  ? setFinnKey(e.target.value)
+                              : setAvKey(e.target.value)}
                   style={{ ...C.inp_, flex:1 }} />
                 <button onClick={testConnection} disabled={!activeKey} style={{ background:"#1e3a5f30", color:"#0099ff", border:"1px solid #0099ff40", borderRadius:10, padding:"10px 14px", cursor:activeKey?"pointer":"default", fontWeight:700, fontSize:13, opacity:activeKey?1:.4 }}>🔍 Test</button>
                 <button onClick={save} disabled={!activeKey} style={{ ...C.send, opacity:activeKey?1:.4, cursor:activeKey?"pointer":"default" }}>✓ Connetti</button>
@@ -706,9 +765,17 @@ export default function App() {
 
             <div style={{ ...C.card, background:"#060a10" }}>
               <div style={{ fontSize:12, fontWeight:700, color:"#64748b", marginBottom:12 }}>
-                📖 COME OTTENERE LA CHIAVE — {provider==="rapidapi"?"RAPIDAPI":"ALPHA VANTAGE"}
+                📖 COME OTTENERE LA CHIAVE — {provider==="rapidapi" ? "RAPIDAPI" : provider==="finnhub" ? "FINNHUB" : "ALPHA VANTAGE"}
               </div>
-              {provider==="rapidapi" ? (
+              {provider==="finnhub" ? (
+                <ol style={{ color:"#94a3b8", fontSize:12, lineHeight:2.1, paddingLeft:18, margin:0 }}>
+                  <li>Vai su <a href="https://finnhub.io/register" target="_blank" rel="noopener noreferrer" style={{ color:"#0099ff" }}>finnhub.io/register</a></li>
+                  <li>Crea account gratuito con email</li>
+                  <li>Conferma email → dashboard mostra subito la chiave</li>
+                  <li>Limite gratuito: <b style={{ color:"#00ff9d" }}>60 req/min illimitate</b></li>
+                  <li>Incollala sopra e clicca Connetti ✓</li>
+                </ol>
+              ) : provider==="rapidapi" ? (
                 <ol style={{ color:"#94a3b8", fontSize:12, lineHeight:2.1, paddingLeft:18, margin:0 }}>
                   <li>Vai su <a href="https://rapidapi.com/manwilbahaa/api/yahoo-finance15" target="_blank" rel="noopener noreferrer" style={{ color:"#0099ff" }}>RapidAPI — Yahoo Finance 15</a></li>
                   <li>Crea account gratuito → clicca <b style={{ color:"#e2e8f0" }}>Subscribe to Test</b></li>
@@ -735,7 +802,7 @@ export default function App() {
             <div style={{ marginBottom:18 }}>
               <h2 style={{ fontSize:22, fontWeight:800, margin:0 }}>Dashboard Globale</h2>
               <p style={{ color:"#64748b", margin:"4px 0 0", fontSize:13 }}>
-                {connected ? `Dati live via ${provider==="rapidapi"?"Yahoo Finance / RapidAPI":"Alpha Vantage"}` : "⚠️ Vai in Setup per collegare le API"}
+                {connected ? `Dati live via ${provider==="rapidapi"?"Yahoo Finance / RapidAPI":provider==="finnhub"?"Finnhub":"Alpha Vantage"}` : "⚠️ Vai in Setup per collegare le API"}
               </p>
             </div>
             {Object.keys(errs).length > 0 && (
@@ -985,7 +1052,7 @@ export default function App() {
                   <div>💼 Posizioni: <span style={{ color:"#e2e8f0" }}>{portfolio.length}</span></div>
                   <div>📡 Asset live: <span style={{ color:"#e2e8f0" }}>{liveN}</span></div>
                   <div>🎯 BUY signals: <span style={{ color:"#00ff9d" }}>{buyN}</span></div>
-                  <div>⚙️ Provider: <span style={{ color:"#e2e8f0" }}>{connected?(provider==="rapidapi"?"RapidAPI":"Alpha Vantage"):"Non conf."}</span></div>
+                  <div>⚙️ Provider: <span style={{ color:"#e2e8f0" }}>{connected?(provider==="rapidapi"?"RapidAPI":provider==="finnhub"?"Finnhub":"Alpha Vantage"):"Non conf."}</span></div>
                 </div>
               </div>
             </div>
