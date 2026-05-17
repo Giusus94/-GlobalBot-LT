@@ -90,6 +90,52 @@ function proxyUrl(targetUrl, key) {
   return `${PROXY}?url=${encodeURIComponent(targetUrl)}&key=${encodeURIComponent(key)}`;
 }
 
+function pickNum(obj, keys) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v == null) continue;
+    const n = typeof v === "number" ? v : parseFloat(v);
+    if (!isNaN(n)) return n;
+  }
+  return null;
+}
+function parseMoney(s) {
+  if (typeof s === "number") return s;
+  if (typeof s !== "string") return null;
+  const m = s.replace(/[$,%+\s]/g, "").match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+function extractQuote(qj) {
+  const body = qj?.body;
+  let q;
+  if (Array.isArray(body) && body.length) q = body[0];
+  else if (body && typeof body === "object") q = body;
+  else if (qj?.quoteResponse?.result?.[0]) q = qj.quoteResponse.result[0];
+  else if (qj?.data?.[0]) q = qj.data[0];
+  else if (qj && typeof qj === "object" && (qj.regularMarketPrice || qj.price || qj.primaryData)) q = qj;
+  else return null;
+  if (!q || typeof q !== "object") return null;
+
+  // NASDAQ-style nested format (yahoo-finance15 /api/v1/markets/quote) → flatten
+  if (q.primaryData && typeof q.primaryData === "object") {
+    const p  = q.primaryData;
+    const ks = q.keyStats || {};
+    const range52 = ks?.fiftyTwoWeekHighLow?.value || "";
+    const range52Nums = (range52.match(/-?\d+(?:\.\d+)?/g) || []).map(parseFloat);
+    return {
+      symbol: q.symbol,
+      regularMarketPrice:         parseMoney(p.lastSalePrice),
+      regularMarketChange:        parseMoney(p.netChange),
+      regularMarketChangePercent: parseMoney(p.percentageChange),
+      fiftyTwoWeekLow:  range52Nums[0] ?? null,
+      fiftyTwoWeekHigh: range52Nums[1] ?? null,
+      regularMarketVolume: parseMoney(ks?.Volume?.value),
+    };
+  }
+
+  return q;
+}
+
 async function fetchRapidAPI(symbol, key) {
   const ck = `r_${symbol}`;
   if (_cache[ck] && Date.now() - _cache[ck].ts < TTL) return _cache[ck].d;
@@ -98,12 +144,10 @@ async function fetchRapidAPI(symbol, key) {
   const qRes = await fetch(proxyUrl(quoteTarget, key));
   if (!qRes.ok) throw new Error(`RapidAPI ${qRes.status}`);
   const qj = await qRes.json();
-  const body = qj?.body;
-  const q = Array.isArray(body) ? body[0]
-          : (body && typeof body === "object") ? body
-          : qj?.quoteResponse?.result?.[0] ?? qj;
-  const price = q?.regularMarketPrice ?? q?.ask ?? q?.price ?? null;
-  if (!price) throw new Error("No price");
+  const q = extractQuote(qj);
+  if (!q) throw new Error(`Risposta vuota da Yahoo (${JSON.stringify(qj).slice(0, 120)})`);
+  const price = pickNum(q, ["regularMarketPrice","price","ask","last","lastPrice","close"]);
+  if (price == null) throw new Error(`Campo prezzo assente. Campi: ${Object.keys(q).slice(0,10).join(", ")}`);
 
   let rsi = 50, ma50 = price, ma200 = price, sparkline = [];
   try {
@@ -121,13 +165,20 @@ async function fetchRapidAPI(symbol, key) {
     }
   } catch (_) {}
 
+  if (ma50 === price)  ma50  = pickNum(q, ["priceAvg50","fiftyDayAverage","ma50"]) ?? price;
+  if (ma200 === price) ma200 = pickNum(q, ["priceAvg200","twoHundredDayAverage","ma200"]) ?? price;
+
   const signal = ltSignal(rsi, price, ma200);
   const score  = calcScore(signal, rsi, price, ma200);
   const d = {
-    price, change: q.regularMarketChange ?? 0, changeP: q.regularMarketChangePercent ?? 0,
-    high52: q.fiftyTwoWeekHigh ?? null, low52: q.fiftyTwoWeekLow ?? null,
-    vol: q.regularMarketVolume ?? 0, rsi,
-    ma50: ma50.toFixed(2), ma200: ma200.toFixed(2),
+    price,
+    change:  pickNum(q, ["regularMarketChange","change"]) ?? 0,
+    changeP: pickNum(q, ["regularMarketChangePercent","changesPercentage","changePercent","percentChange"]) ?? 0,
+    high52:  pickNum(q, ["fiftyTwoWeekHigh","yearHigh"]),
+    low52:   pickNum(q, ["fiftyTwoWeekLow","yearLow"]),
+    vol:     pickNum(q, ["regularMarketVolume","volume"]) ?? 0,
+    rsi,
+    ma50: Number(ma50).toFixed(2), ma200: Number(ma200).toFixed(2),
     signal, score, sparkline, source: "Yahoo / RapidAPI",
   };
   _cache[ck] = { d, ts: Date.now() };
@@ -433,16 +484,52 @@ export default function App() {
   const testConnection = async () => {
     if (!activeKey) return;
     setTestResult({ status: "loading", msg: "Test in corso..." });
+
+    if (provider !== "rapidapi") {
+      try {
+        const d = await fetchAlphaVantage("AAPL", activeKey);
+        setTestResult({ status: "ok", msg: `✓ AAPL = ${d.price?.toFixed(2)} USD, segnale ${d.signal}.` });
+      } catch (e) {
+        setTestResult({ status: "error", msg: `✗ ${e.message}` });
+      }
+      return;
+    }
+
     try {
-      const r = await fetch("/api/proxy?url=" + encodeURIComponent("https://httpbin.org/get"));
-      if (!r.ok && r.status === 404) {
+      const url = "https://yahoo-finance15.p.rapidapi.com/api/v1/markets/quote?ticker=AAPL&type=STOCKS";
+      const r = await fetch(`/api/proxy?url=${encodeURIComponent(url)}&key=${encodeURIComponent(activeKey)}`);
+
+      if (r.status === 404) {
         setTestResult({ status: "error", msg: "Il proxy /api/proxy non risponde (404). Il deploy Vercel non sta servendo la function. In dev locale (npm start) il proxy non gira: usa 'vercel dev'." });
         return;
       }
-      const d = provider === "rapidapi"
-        ? await fetchRapidAPI("AAPL", activeKey)
-        : await fetchAlphaVantage("AAPL", activeKey);
-      setTestResult({ status: "ok", msg: `✓ Connessione OK. AAPL = ${d.price?.toFixed(2)} USD, segnale ${d.signal}.` });
+
+      let j; try { j = await r.json(); } catch { j = null; }
+
+      if (r.status === 401 || r.status === 403) {
+        setTestResult({ status: "error", msg: `Chiave RapidAPI non valida o non iscritta a yahoo-finance15 (HTTP ${r.status}).` });
+        return;
+      }
+      if (r.status === 429) {
+        setTestResult({ status: "error", msg: "Limite richieste superato sul piano RapidAPI." });
+        return;
+      }
+      if (!r.ok) {
+        setTestResult({ status: "error", msg: `HTTP ${r.status}. Risposta: ${JSON.stringify(j).slice(0, 220)}` });
+        return;
+      }
+
+      const q = extractQuote(j);
+      if (!q) {
+        setTestResult({ status: "error", msg: `200 OK ma risposta vuota/inattesa. Chiavi top: ${Object.keys(j||{}).join(", ") || "—"}. Snippet: ${JSON.stringify(j).slice(0, 220)}` });
+        return;
+      }
+      const price = pickNum(q, ["regularMarketPrice","price","ask","last","lastPrice","close"]);
+      if (price == null) {
+        setTestResult({ status: "error", msg: `200 OK ma nessun campo prezzo trovato. Campi disponibili: ${Object.keys(q).slice(0,15).join(", ")}. Probabilmente sei iscritto a un'altra API Yahoo, non a yahoo-finance15 di manwilbahaa.` });
+        return;
+      }
+      setTestResult({ status: "ok", msg: `✓ Connessione OK. AAPL = ${price} USD (campo usato: ${Object.keys(q).find(k => q[k] === price) || "n/d"}).` });
     } catch (e) {
       setTestResult({ status: "error", msg: `✗ ${e.message}` });
     }
