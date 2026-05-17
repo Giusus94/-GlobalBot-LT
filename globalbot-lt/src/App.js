@@ -98,8 +98,11 @@ async function fetchRapidAPI(symbol, key) {
   const qRes = await fetch(proxyUrl(quoteTarget, key));
   if (!qRes.ok) throw new Error(`RapidAPI ${qRes.status}`);
   const qj = await qRes.json();
-  const q  = qj?.body ?? qj?.quoteResponse?.result?.[0] ?? qj;
-  const price = q.regularMarketPrice ?? q.ask ?? null;
+  const body = qj?.body;
+  const q = Array.isArray(body) ? body[0]
+          : (body && typeof body === "object") ? body
+          : qj?.quoteResponse?.result?.[0] ?? qj;
+  const price = q?.regularMarketPrice ?? q?.ask ?? q?.price ?? null;
   if (!price) throw new Error("No price");
 
   let rsi = 50, ma50 = price, ma200 = price, sparkline = [];
@@ -108,8 +111,9 @@ async function fetchRapidAPI(symbol, key) {
     const hRes = await fetch(proxyUrl(histTarget, key));
     if (hRes.ok) {
       const hj = await hRes.json();
-      const items = Object.values(hj?.body ?? {}).filter(i => i.close).slice(-220).reverse();
-      const closes = items.map(i => parseFloat(i.close)).reverse();
+      const rawItems = Object.values(hj?.body ?? {}).filter(i => i && i.close != null);
+      rawItems.sort((a, b) => (a.date ?? a.timestamp ?? 0) - (b.date ?? b.timestamp ?? 0));
+      const closes = rawItems.slice(-220).map(i => parseFloat(i.close)).filter(n => !isNaN(n));
       if (closes.length > 15) {
         rsi = calcRSI(closes); ma50 = calcMA(closes, 50); ma200 = calcMA(closes, 200);
         sparkline = closes.slice(-24);
@@ -197,6 +201,174 @@ function Spark({ closes, change }) {
   );
 }
 
+// ── LOCAL AI (rule-based, no API key needed) ─────────────────────────────────
+const STRATEGY_TIPS = {
+  trend:    "Compra quando il prezzo rompe MA200 al rialzo con momentum confermato. Esci sotto MA200.",
+  value:    "Cerca P/E < 15, P/B < 1.5 e FCF positivo. Holding 3-5+ anni.",
+  dca:      "Versamenti fissi mensili su basket globale (VOO + VWO + GLD). Ignora la volatilità di breve.",
+  momentum: "Top 10-20% per performance 12 mesi. Ribilancia trimestralmente.",
+  macro:    "Allocazione tematica: AI (NVDA, MSFT), transizione energetica, demografia. Posizioni 5-10 anni.",
+  weather:  "30% azioni, 40% bond LT, 15% oro, 15% commodity. Ribilancia annualmente.",
+};
+
+function localAI(question, ctx) {
+  const { mktData, portfolio, watchlist, strat, allAssets } = ctx;
+  const q = (question || "").trim();
+  if (!q) return "Scrivi una domanda.";
+  const ql = q.toLowerCase();
+  const qu = q.toUpperCase();
+  const fmt = (n) => (typeof n === "number" && isFinite(n) ? n.toFixed(2) : (n ?? "—"));
+  const entries = Object.entries(mktData);
+
+  const topByScore = (n, signal) => entries
+    .filter(([_, d]) => !signal || d.signal === signal)
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, n);
+
+  const matchedAsset = allAssets.find(a => qu.includes(a.symbol.toUpperCase()));
+  if (matchedAsset && mktData[matchedAsset.symbol]) {
+    const d = mktData[matchedAsset.symbol];
+    const trend = d.price > parseFloat(d.ma200) ? "sopra MA200 → trend LT rialzista" : "sotto MA200 → trend LT ribassista";
+    const rsiInt = d.rsi < 40 ? "oversold (interessante per accumulo)" : d.rsi > 70 ? "overbought (cautela)" : "neutrale";
+    return `📊 Analisi ${matchedAsset.symbol} — ${matchedAsset.name}
+Prezzo: ${matchedAsset.currency} ${fmt(d.price)} (${d.changeP >= 0 ? "+" : ""}${fmt(d.changeP)}%)
+Trend: ${trend}
+RSI 14: ${d.rsi} → ${rsiInt}
+MA50 / MA200: ${d.ma50} / ${d.ma200}
+Segnale LT: ${d.signal} · Score: ${d.score}/100
+Settore: ${matchedAsset.sector} · Mercato: ${matchedAsset.market}
+
+Suggerimento in ottica ${strat.name}: ${STRATEGY_TIPS[strat.id] || "—"}`;
+  }
+
+  if (/\b(buy|opportunit|comprar|acquist|miglior)/i.test(ql)) {
+    if (!entries.length) return "Nessun dato live caricato. Vai in Mercati e clicca 'Carica' per popolare i dati.";
+    const buys = topByScore(8, "BUY");
+    if (!buys.length) return "Nessun segnale BUY attivo. Considera All Weather o attendi pullback (RSI < 45 e prezzo > MA200).";
+    let out = `📈 Top opportunità BUY a lungo termine:`;
+    for (const [s, d] of buys) {
+      const a = allAssets.find(x => x.symbol === s);
+      out += `\n• ${s}${a ? ` (${a.sector})` : ""} — score ${d.score}, RSI ${d.rsi}, prezzo ${fmt(d.price)}`;
+    }
+    out += `\n\nCriterio: prezzo > MA200 e RSI < 45.`;
+    return out;
+  }
+
+  if (/portafogl|posizion|mie asset|miei asset/i.test(ql)) {
+    if (!portfolio.length) return "Portafoglio vuoto. Aggiungi asset dal tab Mercati (pulsante +).";
+    const stats = portfolio.map(p => ({ ...p, d: mktData[p.symbol] }));
+    const buys  = stats.filter(s => s.d?.signal === "BUY");
+    const sells = stats.filter(s => s.d?.signal === "SELL");
+    const sectors = {};
+    for (const s of stats) sectors[s.sector] = (sectors[s.sector] || 0) + 1;
+    let out = `💼 Portafoglio: ${portfolio.length} posizioni
+Diversificazione settoriale: ${Object.entries(sectors).map(([k,v]) => `${k} (${v})`).join(", ")}
+BUY attivi: ${buys.length} · SELL: ${sells.length}`;
+    if (sells.length) out += `\n\n⚠️ Da rivedere: ${sells.map(s => s.symbol).join(", ")}`;
+    if (buys.length)  out += `\n\n✅ In trend: ${buys.map(s => s.symbol).join(", ")}`;
+    const noData = stats.filter(s => !s.d);
+    if (noData.length) out += `\n\nℹ️ Senza dati live: ${noData.map(s => s.symbol).join(", ")}`;
+    return out;
+  }
+
+  if (/strateg/i.test(ql)) {
+    return `🧠 Strategia attiva: ${strat.name}
+${strat.description}
+Orizzonte: ${strat.horizon} · Rischio: ${strat.risk}
+
+Operatività: ${STRATEGY_TIPS[strat.id] || "—"}`;
+  }
+
+  if (/diversif|commodit|materi[ae] prim/i.test(ql)) {
+    return `🌍 Diversificazione LT bilanciata:
+• 40-50% azioni globali (VOO + VWO + EWJ)
+• 20-30% bond lungo termine (TLT)
+• 10-15% oro (GLD / GC=F)
+• 5-10% commodity reali (CL=F, HG=F, ZW=F)
+• 5-10% real estate (VNQ)
+
+Le commodity offrono protezione da inflazione e bassa correlazione con equity. In ottica All Weather sono strutturali, non tattiche.`;
+  }
+
+  if (/tass[oi]|inflaz|macro|fed|bce|recess/i.test(ql)) {
+    return `📉 Scenario tassi alti:
+• Bond lunghi (TLT) penalizzati a breve, ma yield interessante per LT
+• Equity growth (NQ=F, ARKK) sensibili → preferire value (VOO)
+• Oro (GLD) e commodity reali storicamente resilienti
+• Difensivi: utilities, consumer staples (NESN.SW)
+• Focus su free cash flow positivo e dividendi sostenibili
+
+Strategia consigliata: All Weather o Value Investing.`;
+  }
+
+  if (/difensiv|orso|bear|crash|drawdown|caduta/i.test(ql)) {
+    return `🛡️ Asset difensivi per fase orso:
+• Oro (GLD, GC=F) — hedge classico
+• Bond long duration (TLT) — risk-off rally
+• Consumer staples (NESN.SW)
+• Utilities & healthcare
+• Cash / T-Bills brevi
+
+Riduci leva, aumenta liquidità, evita small cap speculative. Strategia All Weather riduce il drawdown di ~40-50% rispetto a 100% equity.`;
+  }
+
+  if (/tech|energy|energia|settor/i.test(ql)) {
+    const techSyms = ["AAPL","MSFT","NVDA","ASML","SAP.DE","QQQ","ARKK"];
+    const enSyms   = ["CL=F","BZ=F","NG=F"];
+    const summarize = (syms) => {
+      const ds = syms.map(s => mktData[s]).filter(Boolean);
+      if (!ds.length) return "dati non caricati";
+      const avg = (k) => Math.round(ds.reduce((a, b) => a + (b[k] || 0), 0) / ds.length);
+      const buys = ds.filter(d => d.signal === "BUY").length;
+      return `RSI medio ${avg("rsi")}, score medio ${avg("score")}, BUY ${buys}/${ds.length}`;
+    };
+    return `🏭 Confronto settori:
+TECH: ${summarize(techSyms)}
+ENERGY: ${summarize(enSyms)}
+
+Tech: rendimenti storici superiori ma drawdown più ampi. Energy: dividendi alti e protezione da inflazione. Un mix 60/40 tech/energy bilancia growth e difesa.`;
+  }
+
+  if (/etf/i.test(ql)) {
+    const etfs = ["VOO","QQQ","VWO","EWJ","GLD","TLT","VNQ","ARKK"]
+      .map(s => [s, mktData[s]]).filter(([_, d]) => d)
+      .sort((a, b) => b[1].score - a[1].score);
+    if (!etfs.length) return "Carica gli ETF dal tab Mercati per confrontarli.";
+    let out = "🏦 Ranking ETF per score LT:";
+    for (const [s, d] of etfs) out += `\n• ${s} — score ${d.score}, segnale ${d.signal}, RSI ${d.rsi}`;
+    return out;
+  }
+
+  if (/watchlist|seguit/i.test(ql)) {
+    if (!watchlist.length) return "Watchlist vuota.";
+    let out = `⭐ Watchlist (${watchlist.length}):`;
+    for (const s of watchlist) {
+      const d = mktData[s];
+      out += d
+        ? `\n• ${s} — ${fmt(d.price)} · ${d.signal} · score ${d.score}`
+        : `\n• ${s} — dati non caricati`;
+    }
+    return out;
+  }
+
+  if (/ciao|salve|hey|buong|buons/i.test(ql)) {
+    return `Ciao! Sono il bot LT locale. Chiedimi un simbolo (es. "AAPL"), i segnali BUY, l'analisi del portafoglio o uno scenario macro.`;
+  }
+
+  return `Non ho riconosciuto la domanda. Posso aiutarti su:
+
+📊 Analisi simbolo — scrivi un ticker (es. AAPL, VOO, GC=F)
+📈 Segnali BUY — "mostra opportunità BUY"
+💼 Portafoglio — "analizza il portafoglio"
+🧠 Strategia — "spiega la strategia"
+🌍 Diversificazione — "come diversifico?"
+📉 Macro — "scenario tassi alti"
+🛡️ Difensivi — "asset per mercato orso"
+🏭 Settori — "tech vs energy"
+🏦 ETF — "confronta ETF"
+⭐ Watchlist — "mostra watchlist"`;
+}
+
 // ── MAIN ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab]               = useState("setup");
@@ -208,12 +380,12 @@ export default function App() {
   const [mktData, setMktData]       = useState({});
   const [loading, setLoading]       = useState(new Set());
   const [errs, setErrs]             = useState({});
-  const [provider, setProvider]     = useState("rapidapi");
-  const [rapidKey, setRapidKey]     = useState("");
-  const [avKey, setAvKey]           = useState("");
+  const [provider, setProvider]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_provider")) || "rapidapi");
+  const [rapidKey, setRapidKey]     = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_rapidKey")) || "");
+  const [avKey, setAvKey]           = useState(() => (typeof localStorage !== "undefined" && localStorage.getItem("gb_avKey")) || "");
   const [connected, setConnected]   = useState(false);
   const [msgs, setMsgs]             = useState([
-    { role:"assistant", content:"👋 Sono il tuo AI Trading Bot LT.\n\nConfigura le API in ⚙️ Setup per ricevere dati reali da Yahoo Finance / Alpha Vantage.\n\nPosso analizzare azioni, futures, ETF e materie prime globali con RSI, MA50, MA200 e segnali a lungo termine." }
+    { role:"assistant", content:"👋 Sono il tuo Trading Bot LT con AI locale.\n\nAnalizzo i dati live (RSI, MA50, MA200, score) e ti aiuto con strategie, diversificazione, segnali BUY e scenari macro — senza bisogno di chiavi esterne per la chat.\n\nProva: scrivi un ticker (\"AAPL\"), oppure \"mostra opportunità BUY\" o \"analizza il portafoglio\"." }
   ]);
   const [inp, setInp]         = useState("");
   const [typing, setTyping]   = useState(false);
@@ -246,7 +418,17 @@ export default function App() {
     }
   }, [mkt, fetchOne, provider]);
 
-  const save = () => { setConnected(true); setTab("dashboard"); };
+  const save = () => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("gb_provider", provider);
+      if (rapidKey) localStorage.setItem("gb_rapidKey", rapidKey);
+      if (avKey)    localStorage.setItem("gb_avKey", avKey);
+    }
+    setConnected(true);
+    setTab("dashboard");
+  };
+
+  useEffect(() => { if (activeKey) setConnected(true); }, [activeKey]);
   const get  = s => mktData[s];
   const isL  = s => loading.has(s);
 
@@ -274,31 +456,17 @@ export default function App() {
     mb:   { alignSelf:"flex-start", background:"#0f1a2e", border:"1px solid #1e3a5f40", color:"#e2e8f0", borderRadius:"14px 14px 14px 4px", padding:"11px 14px", maxWidth:"82%", fontSize:13, lineHeight:1.65 },
   };
 
-  const sendMsg = async () => {
+  const sendMsg = () => {
     if (!inp.trim() || typing) return;
-    const txt = inp.trim(); setInp("");
-    setMsgs(p => [...p, { role:"user", content:txt }]); setTyping(true);
-    try {
-      const live = Object.entries(mktData).slice(0,12).map(([s,d]) =>
-        `${s}: prezzo=${d.price?.toFixed(2)}, RSI=${d.rsi}, MA200=${d.ma200}, segnale=${d.signal}, score=${d.score}`).join("\n");
-      const sys = `Sei un esperto AI di trading e investimenti a lungo termine. Parli italiano professionale e conciso.
-Strategia attiva: ${strat.name} — ${strat.description} — Orizzonte: ${strat.horizon} — Rischio: ${strat.risk}
-Portafoglio: ${portfolio.length ? portfolio.map(p=>p.symbol).join(", ") : "vuoto"}
-Watchlist: ${watchlist.join(", ")}
-Dati live:\n${live || "nessun dato caricato"}
-Principi: investimento LT, diversificazione globale, gestione rischio disciplinata. Rispondi in modo pratico.`;
-      const anthropicUrl = `/api/proxy?url=${encodeURIComponent("https://api.anthropic.com/v1/messages")}`;
-      const res  = await fetch(anthropicUrl, {
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1000, system:sys,
-          messages:[...msgs.slice(-8), { role:"user", content:txt }]
-        })
-      });
-      const data = await res.json();
-      const reply = data.content?.map(c=>c.text||"").join("") || "Errore risposta.";
-      setMsgs(p => [...p, { role:"assistant", content:reply }]);
-    } catch { setMsgs(p => [...p, { role:"assistant", content:"⚠️ Errore connessione AI." }]); }
-    setTyping(false);
+    const txt = inp.trim();
+    setInp("");
+    setMsgs(p => [...p, { role:"user", content:txt }]);
+    setTyping(true);
+    const reply = localAI(txt, { mktData, portfolio, watchlist, strat, allAssets });
+    setTimeout(() => {
+      setMsgs(p => [...p, { role:"assistant", content: reply }]);
+      setTyping(false);
+    }, 220);
   };
 
   const togglePort = a => setPortfolio(p => p.find(x=>x.symbol===a.symbol) ? p.filter(x=>x.symbol!==a.symbol) : [...p, {...a, addedAt:new Date().toLocaleDateString("it-IT")}]);
@@ -610,8 +778,8 @@ Principi: investimento LT, diversificazione globale, gestione rischio disciplina
               <div style={{ padding:"13px 17px", borderBottom:"1px solid #1e3a5f40", display:"flex", alignItems:"center", gap:10 }}>
                 <div style={{ width:32, height:32, background:"linear-gradient(135deg,#0099ff,#00ff9d)", borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", fontSize:15 }}>⚡</div>
                 <div>
-                  <div style={{ fontWeight:800, fontSize:13 }}>GlobalBot AI</div>
-                  <div style={{ fontSize:10, color:"#00ff9d" }}>● {strat.name} · {liveN} asset live</div>
+                  <div style={{ fontWeight:800, fontSize:13 }}>GlobalBot AI · Locale</div>
+                  <div style={{ fontSize:10, color:"#00ff9d" }}>● {strat.name} · {liveN} asset live · rule-based</div>
                 </div>
               </div>
               <div ref={chatRef} style={{ flex:1, overflowY:"auto", padding:16, display:"flex", flexDirection:"column", gap:10 }}>
